@@ -322,5 +322,21 @@ Main ongoing areas:
 MIT License
 
 
+## Development Philosophy
+
+The project prioritizes long-term production stability over rapid feature accumulation.
+
+Key engineering priorities include:
+
+- deterministic node behavior
+- transport reliability
+- scheduler safety
+- telemetry-driven diagnostics
+- modular subsystem separation
+- real hardware validation
+
 > This repository is the public documentation, architecture, diagnostics, and development showcase for Pro-Light Node.  
 > Core firmware implementation is currently developed in a private repository and will be open-sourced progressively as the architecture stabilizes.
+
+
+
