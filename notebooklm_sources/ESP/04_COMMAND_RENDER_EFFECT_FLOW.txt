@@ -1,0 +1,580 @@
+============================================================
+ESP 04 COMMAND RENDER EFFECT FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: src/control/command/LightCommandProcessor.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/command/LightCommandProcessor.cpp
+SUMMARY: Command processor.
+############################################################
+
+#include "LightCommandProcessor.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "LightState.h"
+#include "LightSafety.h"
+#include "LightRuntimeHealth.h"
+#include "FanManager.h"
+#include "TimeSyncManager.h"
+
+#define TAG "LIGHT_CMD_PROCESSOR"
+
+extern LightState globalState;
+
+bool LightCommandProcessor::apply(const LightCommand& command)
+{
+    if (globalState.stateMutex == NULL) {
+        ESP_LOGE(TAG, "Mutex baslatilmamis!");
+        return false;
+    }
+
+    uint16_t safeValue = LightSafety::clampChannel(command.value);
+
+    if (xSemaphoreTake(globalState.stateMutex, pdMS_TO_TICKS(5)) != pdTRUE) {
+        ESP_LOGE(TAG, "Mutex kilidi alinamadi!");
+        return false;
+    }
+
+    bool stateChanged = false;
+
+    switch (command.type) {
+        case LightCommandType::MASTER_DIMMER:
+            globalState.masterDim.target = safeValue;
+            globalState.currentMode = MODE_BLE_MESH;
+            stateChanged = true;
+            break;
+
+        case LightCommandType::RED:
+            globalState.red.target = safeValue;
+            globalState.currentMode = MODE_BLE_MESH;
+            globalState.currentEffect = EFFECT_NONE;
+            stateChanged = true;
+            break;
+
+        case LightCommandType::GREEN:
+            globalState.green.target = safeValue;
+            globalState.currentMode = MODE_BLE_MESH;
+            globalState.currentEffect = EFFECT_NONE;
+            stateChanged = true;
+            break;
+
+        case LightCommandType::BLUE:
+            globalState.blue.target = safeValue;
+            globalState.currentMode = MODE_BLE_MESH;
+            globalState.currentEffect = EFFECT_NONE;
+            stateChanged = true;
+            break;
+
+        case LightCommandType::EFFECT_SELECT:
+            if (!LightSafety::isValidEffect(command.value)) {
+                xSemaphoreGive(globalState.stateMutex);
+                ESP_LOGW(TAG, "Gecersiz effect value=%u", command.value);
+                LightRuntimeHealth::notifyCommandDropped();
+                return false;
+            }
+
+            globalState.currentEffect = (EffectType)command.value;
+            globalState.currentMode = MODE_BLE_MESH;
+            stateChanged = true;
+            break;
+        case LightCommandType::FAN_MODE:
+            if (!LightSafety::isValidFanMode(command.value)) {
+                xSemaphoreGive(globalState.stateMutex);
+                ESP_LOGW(TAG, "Gecersiz fan mode value=%u", command.value);
+                LightRuntimeHealth::notifyCommandDropped();
+                return false;
+            }
+
+            xSemaphoreGive(globalState.stateMutex);
+
+            FanManager::setMode((FanMode)command.value);
+            LightRuntimeHealth::notifyCommandAccepted();
+
+            ESP_LOGI(
+                TAG,
+                "FAN MODE UPDATED | value=%u source=%d src=0x%04x dst=0x%04x self=0x%04x",
+                command.value,
+                (int)command.source,
+                command.src,
+                command.dst,
+                command.self
+            );
+
+            return true;
+        case LightCommandType::TIME_SYNC:
+            xSemaphoreGive(globalState.stateMutex);
+
+            TimeSyncManager::updateSync(command.startAtMs);
+            LightRuntimeHealth::notifyCommandAccepted();
+
+            ESP_LOGI(
+                TAG,
+                "TIME SYNC UPDATED | phoneTimeMs=%lu src=0x%04x dst=0x%04x self=0x%04x",
+                (unsigned long)command.startAtMs,
+                command.src,
+                command.dst,
+                command.self
+            );
+
+            return true;
+
+        default:
+            xSemaphoreGive(globalState.stateMutex);
+            ESP_LOGW(TAG, "Bilinmeyen light command type=%d", (int)command.type);
+            LightRuntimeHealth::notifyCommandDropped();
+            return false;
+    }
+
+    xSemaphoreGive(globalState.stateMutex);
+
+    if (!stateChanged) {
+        return false;
+    }
+
+    LightRuntimeHealth::notifyCommandAccepted();
+
+    ESP_LOGI(
+        TAG,
+        "TARGET UPDATED | type=%d value=%u safe=%u source=%d src=0x%04x dst=0x%04x self=0x%04x ttl=%u target=%d",
+        (int)command.type,
+        command.value,
+        safeValue,
+        (int)command.source,
+        command.src,
+        command.dst,
+        command.self,
+        command.ttl,
+        (int)command.targetType
+    );
+
+    return true;
+}
+
+############################################################
+END FILE: src/control/command/LightCommandProcessor.cpp
+############################################################
+
+
+############################################################
+FILE: src/control/command/LightCommandProcessor.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/command/LightCommandProcessor.h
+SUMMARY: Processor declarations.
+############################################################
+
+#ifndef LIGHT_COMMAND_PROCESSOR_H
+#define LIGHT_COMMAND_PROCESSOR_H
+
+#include "LightCommand.h"
+
+class LightCommandProcessor {
+public:
+    static bool apply(const LightCommand& command);
+};
+
+#endif
+
+############################################################
+END FILE: src/control/command/LightCommandProcessor.h
+############################################################
+
+
+############################################################
+FILE: src/control/render/LightRenderEngine.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/render/LightRenderEngine.cpp
+SUMMARY: Final render/apply layer.
+############################################################
+
+#include "LightRenderEngine.h"
+
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+
+#include "LightState.h"
+#include "OnboardLed.h"
+#include "LightEffectEngine.h"
+#include "FanManager.h" 
+#include "ThermalManager.h"
+
+extern LightState globalState;
+
+static uint16_t approach(uint16_t current, uint16_t target, uint16_t step)
+{
+    if (current < target) {
+        uint16_t diff = target - current;
+        return current + (diff < step ? diff : step);
+    }
+
+    if (current > target) {
+        uint16_t diff = current - target;
+        return current - (diff < step ? diff : step);
+    }
+
+    return current;
+}
+
+void LightRenderEngine::update()
+{
+    if (globalState.stateMutex == NULL) {
+        return;
+    }
+
+    if (xSemaphoreTake(globalState.stateMutex, pdMS_TO_TICKS(2)) != pdTRUE) {
+        return;
+    }
+
+    const uint16_t step = 24;
+
+    EffectType effect = globalState.currentEffect;
+
+    globalState.masterDim.current = approach(
+        globalState.masterDim.current,
+        globalState.masterDim.target,
+        step
+    );
+
+    if (effect == EFFECT_NONE) {
+        globalState.red.current = approach(globalState.red.current, globalState.red.target, step);
+        globalState.green.current = approach(globalState.green.current, globalState.green.target, step);
+        globalState.blue.current = approach(globalState.blue.current, globalState.blue.target, step);
+    }
+
+    uint16_t red = globalState.red.current;
+    uint16_t green = globalState.green.current;
+    uint16_t blue = globalState.blue.current;
+    uint16_t master = globalState.masterDim.current;
+
+    uint8_t fanLimitPercent = FanManager::getOutputLimitPercent();
+    uint8_t thermalLimitPercent = ThermalManager::getOutputLimitPercent();
+
+    master = (uint16_t)((master * fanLimitPercent) / 100);
+    master = (uint16_t)((master * thermalLimitPercent) / 100);
+
+    xSemaphoreGive(globalState.stateMutex);
+
+    if (master == 0) {
+        OnboardLed::off();
+        return;
+    }
+
+    if (effect != EFFECT_NONE) {
+        uint32_t nowMs = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        LightEffectEngine::generate(effect, nowMs, red, green, blue);
+    }
+
+    uint8_t outR = (uint8_t)((red * master) / 1023 / 4);
+    uint8_t outG = (uint8_t)((green * master) / 1023 / 4);
+    uint8_t outB = (uint8_t)((blue * master) / 1023 / 4);
+
+    OnboardLed::setRgb(outR, outG, outB);
+}
+
+############################################################
+END FILE: src/control/render/LightRenderEngine.cpp
+############################################################
+
+
+############################################################
+FILE: src/control/render/LightRenderEngine.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/render/LightRenderEngine.h
+SUMMARY: Render engine declarations.
+############################################################
+
+#ifndef LIGHT_RENDER_ENGINE_H
+#define LIGHT_RENDER_ENGINE_H
+
+class LightRenderEngine {
+public:
+    static void update();
+};
+
+#endif
+
+############################################################
+END FILE: src/control/render/LightRenderEngine.h
+############################################################
+
+
+############################################################
+FILE: src/effects/LightEffectEngine.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/effects/LightEffectEngine.cpp
+SUMMARY: Effect execution engine.
+############################################################
+
+#include "LightEffectEngine.h"
+
+void LightEffectEngine::generate(
+    EffectType effect,
+    uint32_t nowMs,
+    uint16_t& red,
+    uint16_t& green,
+    uint16_t& blue
+) {
+    red = 0;
+    green = 0;
+    blue = 0;
+
+    switch (effect) {
+        case EFFECT_POLICE: {
+            uint32_t phase = (nowMs / 180) % 4;
+
+            if (phase == 0) {
+                red = 1023;
+            } else if (phase == 2) {
+                blue = 1023;
+            }
+
+            break;
+        }
+
+        case EFFECT_AMBULANCE: {
+            uint32_t phase = (nowMs / 160) % 4;
+
+            if (phase == 0 || phase == 1) {
+                red = 1023;
+            } else {
+                red = 1023;
+                green = 1023;
+                blue = 1023;
+            }
+
+            break;
+        }
+
+        case EFFECT_FIRE: {
+            uint32_t wave = (nowMs / 90) % 6;
+
+            red = 900 + (wave * 20);
+            green = 120 + (wave * 45);
+            blue = 0;
+
+            if (red > 1023) {
+                red = 1023;
+            }
+
+            if (green > 500) {
+                green = 500;
+            }
+
+            break;
+        }
+
+        case EFFECT_LIGHTNING: {
+            uint32_t cycle = nowMs % 2200;
+
+            if (cycle < 80 ||
+                (cycle > 160 && cycle < 220) ||
+                (cycle > 320 && cycle < 360)) {
+                red = 1023;
+                green = 1023;
+                blue = 1023;
+            }
+
+            break;
+        }
+
+        case EFFECT_NONE:
+        default:
+            break;
+    }
+}
+
+############################################################
+END FILE: src/effects/LightEffectEngine.cpp
+############################################################
+
+
+############################################################
+FILE: src/effects/LightEffectEngine.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/effects/LightEffectEngine.h
+SUMMARY: Effect engine declarations.
+############################################################
+
+#ifndef LIGHT_EFFECT_ENGINE_H
+#define LIGHT_EFFECT_ENGINE_H
+
+#include <stdint.h>
+#include "LightEffectType.h"
+
+class LightEffectEngine {
+public:
+    static void generate(
+        EffectType effect,
+        uint32_t nowMs,
+        uint16_t& red,
+        uint16_t& green,
+        uint16_t& blue
+    );
+};
+
+#endif
+
+############################################################
+END FILE: src/effects/LightEffectEngine.h
+############################################################
+
+
+############################################################
+FILE: src/effects/LightEffectType.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/effects/LightEffectType.h
+SUMMARY: Effect type enum/constants.
+############################################################
+
+#ifndef LIGHT_EFFECT_TYPE_H
+#define LIGHT_EFFECT_TYPE_H
+
+enum EffectType {
+    EFFECT_NONE = 0,
+    EFFECT_POLICE = 1,
+    EFFECT_AMBULANCE = 2,
+    EFFECT_FIRE = 3,
+    EFFECT_LIGHTNING = 4
+};
+
+#endif
+
+############################################################
+END FILE: src/effects/LightEffectType.h
+############################################################
+
+
+############################################################
+FILE: src/hardware/LightState.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/hardware/LightState.h
+SUMMARY: Runtime light state.
+############################################################
+
+#ifndef LIGHT_STATE_H
+#define LIGHT_STATE_H
+
+#include "Config.h"
+#include "LightEffectType.h"
+
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
+#include <stdint.h>
+
+
+ 
+
+struct LightChannelState {
+    uint16_t target;
+    uint16_t current;
+};
+
+struct LightState {
+    SystemMode currentMode;
+    EffectType currentEffect;
+
+    LightChannelState red;
+    LightChannelState green;
+    LightChannelState blue;
+    LightChannelState coldWhite;
+    LightChannelState warmWhite;
+    LightChannelState masterDim;
+
+    float currentTempC;
+    bool isOverheated;
+    SemaphoreHandle_t stateMutex;
+};
+
+#endif
+
+############################################################
+END FILE: src/hardware/LightState.h
+############################################################
+
+
+############################################################
+FILE: src/hardware/OnboardLed.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/hardware/OnboardLed.cpp
+SUMMARY: Onboard LED apply layer.
+############################################################
+
+#include "OnboardLed.h"
+#include "Config.h"
+#include "Logger.h"
+
+#include "led_strip.h"
+#include "esp_log.h"
+
+static led_strip_handle_t led_strip = nullptr;
+
+void OnboardLed::init() {
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = PIN_ONBOARD_RGB_LED,
+        .max_leds = ONBOARD_RGB_LED_COUNT,
+    };
+
+    led_strip_rmt_config_t rmt_config = {
+        .resolution_hz = 10 * 1000 * 1000,
+    };
+
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &led_strip));
+    led_strip_clear(led_strip);
+
+    Logger::info("ONBOARD_LED", "Dahili RGB LED baslatildi.");
+}
+
+void OnboardLed::setRgb(uint8_t r, uint8_t g, uint8_t b) {
+    if (led_strip == nullptr) return;
+
+    led_strip_set_pixel(led_strip, 0, r, g, b);
+    led_strip_refresh(led_strip);
+}
+
+void OnboardLed::off() {
+    if (led_strip == nullptr) return;
+
+    led_strip_clear(led_strip);
+}
+
+############################################################
+END FILE: src/hardware/OnboardLed.cpp
+############################################################
+
+
+############################################################
+FILE: src/hardware/OnboardLed.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/hardware/OnboardLed.h
+SUMMARY: Onboard LED declarations.
+############################################################
+
+#ifndef ONBOARD_LED_H
+#define ONBOARD_LED_H
+
+#include <stdint.h>
+
+class OnboardLed {
+public:
+    static void init();
+    static void setRgb(uint8_t r, uint8_t g, uint8_t b);
+    static void off();
+};
+
+#endif
+
+############################################################
+END FILE: src/hardware/OnboardLed.h
+############################################################
+

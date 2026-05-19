@@ -1,0 +1,2233 @@
+============================================================
+ANDROID 01 PROVISIONING FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: MainActivity.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/MainActivity.kt
+SUMMARY: App bootstrap. Provisioner, orchestrator, screens and lifecycle wiring.
+############################################################
+
+package com.example.prolightmesh
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import android.widget.Toast
+import com.example.prolightmesh.ble.BlePermissionHelper
+import com.example.prolightmesh.ble.BleScannerManager
+import com.example.prolightmesh.ble.MeshScanResult
+import com.example.prolightmesh.mesh.*
+import com.example.prolightmesh.storage.MeshLocalStore
+import com.example.prolightmesh.ui.components.DeviceMiniCard
+import com.example.prolightmesh.ui.dialogs.DeviceSetupDialog
+import com.example.prolightmesh.ui.dialogs.ProvisionProgressDialog
+import com.example.prolightmesh.ui.navigation.AppNavigator
+import com.example.prolightmesh.ui.navigation.BottomNavView
+import com.example.prolightmesh.ui.screens.GroupsScreen
+import com.example.prolightmesh.ui.screens.NetworkScreen
+import com.example.prolightmesh.ui.screens.NewDeviceScreen
+import com.example.prolightmesh.ui.screens.WorkScreen
+import com.example.prolightmesh.mesh.protocol.TimeSyncService
+
+class MainActivity : Activity() {
+
+    private lateinit var permissionHelper: BlePermissionHelper
+    private lateinit var bleScannerManager: BleScannerManager
+    private lateinit var meshController: MeshController
+    private lateinit var meshProvisioner: MeshProvisioner
+    private lateinit var meshForgetManager: MeshForgetManager
+    private lateinit var meshConfigurator: MeshConfigurator
+    private lateinit var meshCommander: MeshCommander
+    private lateinit var meshSetupOrchestrator: MeshSetupOrchestrator
+    private lateinit var commandService: MeshCommandService
+    private lateinit var configService: MeshConfigService
+    private lateinit var autoReconnectService: MeshAutoReconnectService
+    private lateinit var localStore: MeshLocalStore
+
+    private lateinit var navigator: AppNavigator
+    private lateinit var bottomNavView: BottomNavView
+    private lateinit var workScreen: WorkScreen
+    private lateinit var networkScreen: NetworkScreen
+    private lateinit var groupsScreen: GroupsScreen
+    private lateinit var newDeviceScreen: NewDeviceScreen
+
+    private lateinit var progressDialog: ProvisionProgressDialog
+
+    private val foundDevices = mutableMapOf<String, MeshScanResult>()
+    private val networkCards = mutableMapOf<Int, DeviceMiniCard>()
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private lateinit var presenceService: MeshPresenceService
+    private var currentlyProvisioningMac: String? = null
+    private var provisioningInProgress = false
+    private var heartbeatStarted = false
+
+    private lateinit var timeSyncService: TimeSyncService
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        localStore = MeshLocalStore(this)
+        //localStore.debugBindKnownMacs()
+
+        meshController = MeshController(this)
+        meshConfigurator = MeshConfigurator(meshController)
+        meshCommander = MeshCommander(meshController)
+
+        timeSyncService = TimeSyncService(
+            meshController = meshController,
+            meshCommander = meshCommander,
+            mainHandler = mainHandler,
+            onStatus = { msg ->
+                runOnUiThread { handleStatusUpdate(msg) }
+            }
+        )
+
+
+        meshForgetManager = MeshForgetManager(meshController)
+
+        progressDialog = ProvisionProgressDialog(this)
+
+        permissionHelper = BlePermissionHelper(this)
+        permissionHelper.requestPermissions()
+
+        setupMeshCallbacks()
+
+        configService = MeshConfigService(
+            meshController = meshController,
+            meshConfigurator = meshConfigurator,
+            onStatus = { msg ->
+                runOnUiThread { handleStatusUpdate(msg) }
+            },
+            onConfigStarted = {
+                runOnUiThread {
+                    Log.w("CONFIG_LOCK", "Config başladı. Scan ve auto reconnect pause ediliyor.")
+                    presenceService.pause("config_started")
+                    if (bleScannerManager.isScanRunning()) {
+                        bleScannerManager.stopScan()
+                    }
+                    autoReconnectService.pause("config_started")
+                }
+            },
+            onConfigFinished = {
+                runOnUiThread {
+                    Log.w("CONFIG_LOCK", "Config bitti. Auto reconnect resume ediliyor.")
+                    autoReconnectService.resume("config_finished")
+
+                    if (navigator.currentScreen == AppNavigator.Screen.NETWORK) {
+                        presenceService.resume("config_finished")
+                    }
+                }
+            }
+        )
+        setupProvisioner()
+
+        commandService = MeshCommandService(
+            meshController = meshController,
+            meshCommander = meshCommander,
+            timeSyncService = timeSyncService
+        ) { msg ->
+            runOnUiThread { handleStatusUpdate(msg) }
+        }
+
+        setupScanner()
+
+        presenceService = MeshPresenceService(
+            scannerManagerProvider = { bleScannerManager },
+            mainHandler = mainHandler
+        )
+
+        setupOrchestrator()
+
+        initScreens()
+        navigator.showWork()
+
+        autoReconnectService.startAutoReconnectLoop()
+        // startHeartbeatLoop()
+    }
+
+    private fun setupMeshCallbacks() {
+        meshController.onVendorStateReceived = { src, type, value ->
+            runOnUiThread {
+                localStore.updateNodeState(src, type, value)
+
+                networkCards[src]?.setOnlineState(DeviceMiniCard.OnlineState.ONLINE)
+
+                if (navigator.currentScreen == AppNavigator.Screen.NETWORK) {
+                    networkScreen.setStatus("Son cevap: 0x${src.toString(16)} -> $type:$value")
+                }
+            }
+        }
+    }
+
+    private fun setupProvisioner() {
+        meshProvisioner = MeshProvisioner(
+            context = this,
+            meshController = meshController,
+            onStatus = { msg ->
+                runOnUiThread {
+                    handleStatusUpdate(msg)
+                    progressDialog.updateStatus(msg)
+                }
+            },
+            onProvisionCompleted = {
+                runOnUiThread {
+
+                    Log.w(
+                        "PROVISION_FLOW",
+                        "Provision completed -> auto reconnect resume"
+                    )
+
+                    provisioningInProgress = false
+
+                    autoReconnectService.resume("provision_completed")
+
+                    meshSetupOrchestrator.onProvisionCompleted()
+                }
+            },
+            onProxyConnected = {
+                runOnUiThread {
+                    autoReconnectService.onProxyConnected()
+                    meshSetupOrchestrator.onProxyConnected()
+                    handleStatusUpdate("✅ Proxy bağlı. Mesh hazır.")
+
+                    // Proxy bağlandıktan sonra manuel/provision scan artık gereksiz.
+                    if (bleScannerManager.isScanRunning()) {
+                        bleScannerManager.stopScan()
+                    }
+
+                    // DİKKAT:
+                    // Burada configureAllNodes veya configureSingleNode çağırmıyoruz.
+                    // Config sadece DeviceSetupDialog tamamlandıktan sonra başlayacak.
+                }
+            },
+            onProxyDisconnected = {
+                runOnUiThread {
+                    autoReconnectService.onProxyDisconnected()
+                }
+            }
+        )
+
+        autoReconnectService = MeshAutoReconnectService(
+            meshController = meshController,
+            meshProvisioner = meshProvisioner,
+            mainHandler = mainHandler,
+            onStatus = { msg ->
+                runOnUiThread {
+                    handleStatusUpdate(msg)
+                }
+            }
+        )
+    }
+    private fun setupScanner() {
+        bleScannerManager = BleScannerManager(
+            context = this,
+            onDeviceFound = { result ->
+                runOnUiThread {
+                    meshSetupOrchestrator.onDeviceFound(result)
+
+                    if (result.isProvisioned) {
+
+                        val pendingNode = localStore.getPendingDeleteNodeByMac(result.address)
+
+                        if (pendingNode != null) {
+                            autoReconnectService.onProvisionedProxyFound(result)
+
+                            if (meshController.isProxyReady() &&
+                                localStore.canAttemptPendingReset(pendingNode.unicastAddress)
+                            ) {
+                                Log.e(
+                                    "PENDING_DELETE",
+                                    "Pending delete cihaz görüldü. Reset deneniyor: addr=0x${pendingNode.unicastAddress.toString(16)} mac=${result.address}"
+                                )
+
+                                localStore.markPendingResetAttempt(pendingNode.unicastAddress)
+                                meshForgetManager.resetNode(pendingNode.unicastAddress)
+
+                                mainHandler.postDelayed({
+                                    localStore.removeNode(pendingNode.unicastAddress)
+                                    meshForgetManager.localForget(pendingNode.unicastAddress)
+
+                                    Log.e(
+                                        "PENDING_DELETE",
+                                        "Pending delete tamamlandı: addr=0x${pendingNode.unicastAddress.toString(16)}"
+                                    )
+
+                                    refreshNetworkCardsFromLastSeen()
+                                }, 2_500L)
+                            }
+
+                            return@runOnUiThread
+                        }
+
+// Provision aktifken scan update lifecycle'ını askıya al.
+// Provision complete sonrası tekrar normal akış başlayacak.
+                        if (provisioningInProgress) {
+                            Log.d(
+                                "SCAN_PRESENCE",
+                                "Provision sürecinde provisioned adv görüldü, localStore update atlandı: mac=${result.address}"
+                            )
+
+                            autoReconnectService.onProvisionedProxyFound(result)
+                            return@runOnUiThread
+                        }
+
+                        result.nodeAddressFromAdv?.let { nodeAddress ->
+                            localStore.updateLastSeenByScanByNodeAddress(nodeAddress, result.rssi)
+                        } ?: run {
+                            localStore.updateLastSeenByScanByMac(result.address, result.rssi)
+                        }
+
+                        refreshNetworkCardsFromLastSeen()
+                        autoReconnectService.onProvisionedProxyFound(result)
+                        return@runOnUiThread
+                    }
+
+                    if (!foundDevices.containsKey(result.address)) {
+                        foundDevices[result.address] = result
+
+                        if (navigator.currentScreen == AppNavigator.Screen.NEW_DEVICE) {
+                            newDeviceScreen.addDevice(result)
+                        }
+                    }
+                }
+            },
+            onScanFinished = { _ ->
+                runOnUiThread {
+                    autoReconnectService.onScanFinished()
+
+                    if (navigator.currentScreen == AppNavigator.Screen.NEW_DEVICE) {
+                        newDeviceScreen.setStatus("Tarama bitti. Bulunan: ${foundDevices.size}")
+                        newDeviceScreen.setScanEnabled(true)
+                        newDeviceScreen.stopRadar()
+                    }
+                }
+            },
+            onError = { error ->
+                runOnUiThread {
+                    autoReconnectService.onScanFinished()
+                    Toast.makeText(this, error, Toast.LENGTH_LONG).show()
+                }
+            }
+        )
+    }
+
+    private fun setupOrchestrator() {
+        meshSetupOrchestrator = MeshSetupOrchestrator(
+            scannerManagerProvider = { bleScannerManager },
+            meshProvisionerProvider = { meshProvisioner },
+            onStatus = { msg ->
+                runOnUiThread {
+                    handleStatusUpdate(msg)
+                    progressDialog.updateStatus(msg)
+                }
+            },
+            onReady = {
+                runOnUiThread {
+                    progressDialog.dismiss()
+
+                    if (currentlyProvisioningMac != null) {
+                        val network = meshController.meshManagerApi.meshNetwork
+                        val provisionerAddr = network?.provisionerAddress
+
+                        val lastNode = network?.nodes
+                            ?.filter { it.unicastAddress != provisionerAddr }
+                            ?.maxByOrNull { it.unicastAddress }
+
+                        if (lastNode != null) {
+                            showDeviceSetupDialog(lastNode.unicastAddress)
+                        } else {
+                            Toast.makeText(
+                                this@MainActivity,
+                                "Hata: Cihaz ağa başarıyla kaydedilemedi. Cihazı sıfırlayıp tekrar deneyin.",
+                                Toast.LENGTH_LONG
+                            ).show()
+
+                            currentlyProvisioningMac = null
+                            showNetworkScreen()
+                        }
+                    }
+                }
+            }
+        )
+    }
+
+    private fun initScreens() {
+        bottomNavView = BottomNavView(
+            activity = this,
+            onGroupsClicked = { showGroupsScreen() },
+            onNetworkClicked = { showNetworkScreen() },
+            onWorkClicked = { showWorkScreen() },
+            onNewDeviceClicked = { showNewDeviceScreen() }
+        )
+
+        workScreen = WorkScreen(
+            activity = this,
+            onGlobalDimChanged = { dimValue ->
+                commandService.sendGroupDim(MeshConfigurator.GROUP_ALL_LIGHTS, dimValue)
+            },
+            onGroupColorChanged = { address, r, g, b ->
+                commandService.sendRgb(address, r, g, b)
+            },
+            onGroupDimChanged = { address, dimValue ->
+                commandService.sendGroupDim(address, dimValue)
+            },
+            onGroupEffectChanged = { address, effectValue ->
+                commandService.sendScheduledGroupEffect(address, effectValue)
+            },
+            onGroupFanModeChanged = { address, fanMode ->
+                commandService.sendGroupFanMode(address, fanMode)
+            }
+        )
+
+        networkScreen = NetworkScreen(activity = this)
+
+        groupsScreen = GroupsScreen(
+            activity = this,
+            onAddGroup = { name ->
+                localStore.addGroup(name)
+                showGroupsScreen()
+            },
+            onDeleteGroup = { group ->
+                localStore.deleteGroup(group.address)
+                showGroupsScreen()
+            }
+        )
+
+        newDeviceScreen = NewDeviceScreen(
+            activity = this,
+            onScanClicked = { radarView ->
+
+                if (bleScannerManager.isScanRunning()) {
+                    newDeviceScreen.setStatus("Tarama zaten devam ediyor...")
+                    return@NewDeviceScreen
+                }
+
+                foundDevices.clear()
+                newDeviceScreen.resetLists()
+
+                newDeviceScreen.setScanEnabled(false) // 🔥
+
+                radarView.startScanning()
+                newDeviceScreen.setStatus("Etraftaki cihazlar aranıyor...")
+
+                autoReconnectService.pause("new_device_scan_started")
+                presenceService.pause("new_device_scan_started")
+                bleScannerManager.startScan()
+
+                mainHandler.postDelayed({
+                    bleScannerManager.stopScan()
+                    radarView.stopScanning()
+                    newDeviceScreen.setScanEnabled(true)
+
+                    if (currentlyProvisioningMac == null) {
+                        autoReconnectService.resume("new_device_scan_finished")
+                    }
+                }, 10_000L)
+            },
+            onDeviceClicked = { device ->
+                provisioningInProgress = true
+                currentlyProvisioningMac = device.address
+
+                presenceService.pause("provision_started")
+                autoReconnectService.pause("provision_started")
+
+                if (bleScannerManager.isScanRunning()) {
+                    bleScannerManager.stopScan(
+                        BleScannerManager.ScanStopReason.PROVISION
+                    )
+                }
+
+                newDeviceScreen.stopRadar()
+
+                progressDialog.updateStatus("Hazırlanıyor...")
+                progressDialog.show()
+
+                meshSetupOrchestrator.startManualProvisioning(device)
+            }
+        )
+
+        navigator = AppNavigator(
+            activity = this,
+            bottomNavView = bottomNavView,
+            workScreen = workScreen,
+            networkScreen = networkScreen,
+            groupsScreen = groupsScreen,
+            newDeviceScreen = newDeviceScreen
+        )
+    }
+
+    private fun startHeartbeatLoop() {
+        if (heartbeatStarted) return
+        heartbeatStarted = true
+
+        mainHandler.postDelayed(object : Runnable {
+            override fun run() {
+                if (meshController.isProxyReady()) {
+                    val network = meshController.meshManagerApi.meshNetwork
+                    val provisionerAddress = network?.provisionerAddress
+
+                    val nodes = network?.nodes
+                        ?.filter { it.unicastAddress != provisionerAddress }
+                        ?: emptyList()
+
+                    var delay = 0L
+
+                    nodes.forEach { node ->
+                        mainHandler.postDelayed({
+                            commandService.sendPing(node.unicastAddress)
+                        }, delay)
+
+                        delay += 250L
+                    }
+                }
+
+                refreshNetworkCardsFromLastSeen()
+                mainHandler.postDelayed(this, 10_000L)
+            }
+        }, 10_000L)
+    }
+
+    private fun refreshNetworkCardsFromLastSeen() {
+        if (navigator.currentScreen != AppNavigator.Screen.NETWORK) return
+
+        val now = System.currentTimeMillis()
+
+        networkCards.forEach { (nodeAddress, card) ->
+            val storedNode = localStore.getNode(nodeAddress)
+            val lastSeenByScan = storedNode?.lastSeenByScan ?: 0L
+            val lastSeenByMesh = storedNode?.lastSeenByMesh ?: 0L
+            val lastSeen = maxOf(lastSeenByScan, lastSeenByMesh)
+
+            val ageMs = if (lastSeen > 0L) now - lastSeen else Long.MAX_VALUE
+
+            card.setSignalRssi(storedNode?.lastRssi ?: -100)
+
+            when {
+                lastSeen == 0L -> card.setOnlineState(DeviceMiniCard.OnlineState.CHECKING)
+                ageMs < 45_000L -> card.setOnlineState(DeviceMiniCard.OnlineState.ONLINE)
+                ageMs < 120_000L -> card.setOnlineState(DeviceMiniCard.OnlineState.STALE)
+                else -> card.setOnlineState(DeviceMiniCard.OnlineState.OFFLINE)
+            }
+        }
+    }
+    private fun showWorkScreen() {
+        presenceService.stop()
+
+        if (bleScannerManager.isScanRunning()) {
+            bleScannerManager.stopScan()
+        }
+
+        workScreen.renderGroups(localStore.getGroups())
+        navigator.showWork()
+    }
+
+    private fun showGroupsScreen() {
+        presenceService.stop()
+
+        if (bleScannerManager.isScanRunning()) {
+            bleScannerManager.stopScan()
+        }
+
+        groupsScreen.renderGroups(localStore.getGroups())
+        navigator.showGroups()
+    }
+    private fun showNewDeviceScreen() {
+        // New Device ekranında presence scan kesin durmalı.
+        // Burada sadece manuel scan çalışacak.
+         presenceService.stop()
+
+        if (bleScannerManager.isScanRunning()) {
+            bleScannerManager.stopScan()
+        }
+
+        foundDevices.clear()
+        newDeviceScreen.resetLists()
+        newDeviceScreen.setScanEnabled(true)
+        newDeviceScreen.setStatus("Radar hazır. Taramayı başlatın.")
+        navigator.showNewDevice()
+    }
+
+    private fun showNetworkScreen() {
+        Log.e("NETWORK_DEBUG", "===== NETWORK START =====")
+
+        presenceService.start()
+        presenceService.setNetworkScreenVisible(true)
+
+        networkScreen.clear()
+        networkCards.clear()
+
+        val network = meshController.meshManagerApi.meshNetwork
+
+        if (network == null) {
+            Log.e("NETWORK_DEBUG", "NETWORK NULL")
+            networkScreen.setStatus("Mesh network yüklenmemiş.")
+            navigator.showNetwork()
+            return
+        }
+
+        val provisionerAddress = network.provisionerAddress
+
+        Log.e(
+            "NETWORK_DEBUG",
+            "Provisioner=0x${provisionerAddress?.toString(16)}"
+        )
+
+        Log.e(
+            "NETWORK_DEBUG",
+            "RawNodeCount=${network.nodes.size}"
+        )
+
+        network.nodes.forEach { node ->
+            Log.e(
+                "NETWORK_DEBUG",
+                "RAW_NODE -> addr=0x${node.unicastAddress.toString(16)} name=${node.nodeName} elements=${node.elements.size}"
+            )
+        }
+
+        val nodes = network.nodes
+            .filter { it.unicastAddress != provisionerAddress }
+            .filter { node ->
+                localStore.getNode(node.unicastAddress)?.pendingDelete != true
+            }
+
+        Log.e(
+            "NETWORK_DEBUG",
+            "FixtureNodeCount=${nodes.size}"
+        )
+
+        if (nodes.isEmpty()) {
+            Log.e("NETWORK_DEBUG", "Fixture node yok. Network DB boş veya sadece provisioner var.")
+            networkScreen.setStatus("Henüz Fixtures bulunmuyor.")
+            navigator.showNetwork()
+            return
+        }
+
+        networkScreen.setStatus("${nodes.size} fixture kontrol ediliyor...")
+
+        val now = System.currentTimeMillis()
+
+        nodes.forEach { node ->
+            val nodeAddress = node.unicastAddress
+            val storedNode = localStore.getNode(nodeAddress)
+            val addressHex = "0x${nodeAddress.toString(16)}"
+
+            Log.e(
+                "NETWORK_DEBUG",
+                "CARD_CREATE -> addr=$addressHex storedName=${storedNode?.name} meshName=${node.nodeName}"
+            )
+
+            val card = DeviceMiniCard(
+                context = this,
+                name = storedNode?.name ?: node.nodeName ?: "PRO-NODE",
+                addressHex = addressHex,
+                dimValue = storedNode?.masterDim ?: 0,
+                onSettingsClicked = {
+                    showNodeSettingsMenu(nodeAddress, storedNode?.name ?: "PRO-NODE")
+                },
+                onPingClicked = {
+                    Log.e(
+                        "NETWORK_DEBUG",
+                        "MANUAL_PING_CLICK -> addr=0x${nodeAddress.toString(16)}"
+                    )
+                    commandService.sendPing(nodeAddress)
+                }
+            )
+
+            card.setSignalRssi(storedNode?.lastRssi ?: -100)
+
+            val lastSeenByScan = storedNode?.lastSeenByScan ?: 0L
+            val lastSeenByMesh = storedNode?.lastSeenByMesh ?: 0L
+            val lastSeen = maxOf(lastSeenByScan, lastSeenByMesh)
+
+            val ageMs = if (lastSeen > 0L) now - lastSeen else Long.MAX_VALUE
+
+            Log.e(
+                "NETWORK_DEBUG",
+                "CARD_STATE -> addr=$addressHex lastSeenByScan=$lastSeenByScan lastSeenByMesh=$lastSeenByMesh usedLastSeen=$lastSeen ageMs=$ageMs"
+            )
+
+            when {
+                lastSeen == 0L -> card.setOnlineState(DeviceMiniCard.OnlineState.CHECKING)
+                ageMs < 45_000L -> card.setOnlineState(DeviceMiniCard.OnlineState.ONLINE)
+                ageMs < 120_000L -> card.setOnlineState(DeviceMiniCard.OnlineState.STALE)
+                else -> card.setOnlineState(DeviceMiniCard.OnlineState.OFFLINE)
+            }
+
+            networkCards[nodeAddress] = card
+            networkScreen.addNodeCard(card)
+        }
+
+        navigator.showNetwork()
+
+        if (meshController.isProxyReady()) {
+            Log.e("NETWORK_DEBUG", "Proxy hazır. Mesh health ping 3000ms sonra sırayla gönderilecek.")
+
+            var pingDelay = 3_000L
+
+            nodes.forEach { node ->
+                mainHandler.postDelayed({
+                    if (navigator.currentScreen != AppNavigator.Screen.NETWORK) {
+                        Log.e(
+                            "NETWORK_DEBUG",
+                            "PING_SKIP -> Network ekranı artık açık değil. addr=0x${node.unicastAddress.toString(16)}"
+                        )
+                        return@postDelayed
+                    }
+
+                    if (!meshController.isProxyReady()) {
+                        Log.e(
+                            "NETWORK_DEBUG",
+                            "PING_SKIP -> Proxy hazır değil. addr=0x${node.unicastAddress.toString(16)}"
+                        )
+                        return@postDelayed
+                    }
+
+                    Log.e(
+                        "NETWORK_DEBUG",
+                        "PING_SEND_DELAYED -> addr=0x${node.unicastAddress.toString(16)} delayMs=$pingDelay"
+                    )
+
+                    commandService.sendPing(node.unicastAddress)
+                }, pingDelay)
+
+                pingDelay += 1_000L
+            }
+        } else {
+            Log.e("NETWORK_DEBUG", "Proxy hazır değil. Auto reconnect proxy arayacak.")
+            networkScreen.setStatus("Proxy bağlı değil. Otomatik bağlantı aranıyor...")
+        }
+
+        Log.e("NETWORK_DEBUG", "===== NETWORK END =====")
+    }
+    private fun showDeviceSetupDialog(nodeAddress: Int) {
+        val setupDialog = DeviceSetupDialog(
+            context = this,
+            groups = localStore.getGroups(),
+            onSetupComplete = { deviceName, selectedGroups ->
+
+                if (selectedGroups.isEmpty()) {
+                    Toast.makeText(
+                        this@MainActivity,
+                        "En az bir grup seçmelisiniz.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@DeviceSetupDialog
+                }
+
+                selectedGroups.forEach { groupAddress ->
+                    localStore.addNodeToGroup(
+                        nodeAddress = nodeAddress,
+                        nodeName = deviceName,
+                        groupAddress = groupAddress,
+                        macAddress = currentlyProvisioningMac
+                    )
+                }
+
+                handleStatusUpdate("⚙️ Cihaz config başlatılıyor: 0x${nodeAddress.toString(16)}")
+                progressDialog.updateStatus("Cihaz yapılandırılıyor...")
+                progressDialog.show()
+
+                configureGroupsSequentially(
+                    nodeAddress = nodeAddress,
+                    groups = selectedGroups,
+                    index = 0,
+                    onDone = {
+                        currentlyProvisioningMac?.let { mac ->
+                            newDeviceScreen.removeDevice(mac)
+                            foundDevices.remove(mac)
+                        }
+
+                        currentlyProvisioningMac = null
+
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Işık yapılandırıldı. Durum kontrol ediliyor...",
+                            Toast.LENGTH_SHORT
+                        ).show()
+
+                        progressDialog.dismiss()
+                        showNetworkScreen()
+                    }
+                )
+            }
+        )
+
+        setupDialog.show()
+    }
+    private fun configureGroupsSequentially(
+        nodeAddress: Int,
+        groups: List<Int>,
+        index: Int,
+        onDone: () -> Unit
+    ) {
+        if (index >= groups.size) {
+            onDone()
+            return
+        }
+
+        if (!meshController.isProxyReady()) {
+            Log.w(
+                "CONFIG_FLOW",
+                "Proxy hazır değil. Config bekletiliyor. node=0x${nodeAddress.toString(16)} groupIndex=$index"
+            )
+
+            handleStatusUpdate("Proxy bekleniyor, config başlatılacak...")
+
+            mainHandler.postDelayed({
+                configureGroupsSequentially(
+                    nodeAddress = nodeAddress,
+                    groups = groups,
+                    index = index,
+                    onDone = onDone
+                )
+            }, 1_000L)
+
+            return
+        }
+
+        val groupAddress = groups[index]
+
+        Log.w(
+            "CONFIG_FLOW",
+            "Config group başlıyor. node=0x${nodeAddress.toString(16)} group=0x${groupAddress.toString(16)} index=${index + 1}/${groups.size}"
+        )
+
+        configService.configureSingleNode(
+            nodeAddress = nodeAddress,
+            groupAddress = groupAddress,
+            onComplete = {
+                Log.w(
+                    "CONFIG_FLOW",
+                    "Config group tamamlandı. node=0x${nodeAddress.toString(16)} group=0x${groupAddress.toString(16)}"
+                )
+
+                configureGroupsSequentially(
+                    nodeAddress = nodeAddress,
+                    groups = groups,
+                    index = index + 1,
+                    onDone = onDone
+                )
+            }
+        )
+    }
+    private fun showNodeSettingsMenu(nodeAddress: Int, nodeName: String) {
+        val options = arrayOf(
+            "⚙️ Grubu Değiştir",
+            "🔄 Cihazı sıfırla ve sil",
+            "🧹 Sadece uygulamadan kaldır",
+            "⏳ Offline sil / reset beklemeye al"
+        )
+
+        AlertDialog.Builder(this)
+            .setTitle("$nodeName Ayarları")
+            .setItems(options) { _, which ->
+                when (which) {
+                    0 -> {
+                        Toast.makeText(
+                            this,
+                            "Grup ayarları açılıyor...",
+                            Toast.LENGTH_SHORT
+                        ).show()
+                    }
+
+                    1 -> {
+                        if (!meshController.isProxyReady()) {
+                            Toast.makeText(
+                                this,
+                                "Proxy bağlı değil. Cihaz resetlenemedi.",
+                                Toast.LENGTH_LONG
+                            ).show()
+                            return@setItems
+                        }
+
+                        meshForgetManager.resetNode(nodeAddress)
+
+                        mainHandler.postDelayed({
+                            localStore.removeNode(nodeAddress)
+                            meshForgetManager.localForget(nodeAddress)
+
+                            Toast.makeText(
+                                this,
+                                "Cihaz sıfırlandı ve silindi.",
+                                Toast.LENGTH_SHORT
+                            ).show()
+
+                            showNetworkScreen()
+                        }, 2_500L)
+                    }
+
+                    2 -> {
+                        localStore.removeNode(nodeAddress)
+                        meshForgetManager.localForget(nodeAddress)
+
+                        Toast.makeText(
+                            this,
+                            "Cihaz sadece uygulamadan kaldırıldı.",
+                            Toast.LENGTH_SHORT
+                        ).show()
+
+                        showNetworkScreen()
+                    }
+
+                    3 -> {
+                        localStore.markNodePendingDelete(nodeAddress)
+
+                        Toast.makeText(
+                            this,
+                            "Cihaz gizlendi. Tekrar görülürse reset denenecek.",
+                            Toast.LENGTH_LONG
+                        ).show()
+
+                        showNetworkScreen()
+                    }
+                }
+            }
+            .setNegativeButton("Kapat", null)
+            .show()
+    }
+    private fun handleStatusUpdate(message: String) {
+        when (navigator.currentScreen) {
+            AppNavigator.Screen.WORK -> workScreen.setStatus(message)
+            AppNavigator.Screen.NEW_DEVICE -> newDeviceScreen.setStatus(message)
+            AppNavigator.Screen.NETWORK -> networkScreen.setStatus(message)
+            else -> {}
+        }
+    }
+
+    override fun onDestroy() {
+        presenceService.stop()
+        mainHandler.removeCallbacksAndMessages(null)
+        meshProvisioner.disconnect()
+        super.onDestroy()
+    }
+}
+
+############################################################
+END FILE: MainActivity.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshProvisioner.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshProvisioner.kt
+SUMMARY: Provisioning: cihazı BLE Mesh ağına alma süreci.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothManager
+import android.content.Context
+import android.util.Log
+import com.example.prolightmesh.ble.MeshScanResult
+
+class MeshProvisioner(
+    private val context: Context,
+    private val meshController: MeshController,
+    private val onStatus: (String) -> Unit,
+    private val onProvisionCompleted: (() -> Unit)? = null,
+    private val onProxyConnected: (() -> Unit)? = null,
+    private val onProxyDisconnected: (() -> Unit)? = null
+) {
+    private var gattManager: MeshGattManager? = null
+
+    private var proxyConnecting = false
+    private var proxyConnected = false
+    private var activeProxyAddress: String? = null
+
+    @SuppressLint("MissingPermission")
+    fun provision(device: MeshScanResult) {
+        val deviceUuid = device.deviceUuid ?: run {
+            onStatus("Device UUID yok. Provision yapılamaz.")
+            Log.e(TAG, "Device UUID yok: $device")
+            return
+        }
+
+        Log.d(TAG, "Provision başlatılıyor: ${device.name} / ${device.address}")
+        onStatus("PB-GATT bağlanıyor: ${device.name}")
+
+        clearGattOnly()
+
+        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        val bluetoothDevice = bluetoothManager.adapter.getRemoteDevice(device.address)
+
+        gattManager = MeshGattManager(
+            context = context,
+            isProxy = false,
+            onConnected = {
+                Log.d(TAG, "PB-GATT bağlantısı başarılı")
+                onStatus("PB-GATT bağlandı. Node identify başlatılıyor...")
+
+                meshController.pduSender = { pdu ->
+                    gattManager?.sendPdu(pdu)
+                }
+
+                meshController.onProvisioningStatus = { status ->
+                    onStatus(status)
+
+                    if (status.contains("Provision COMPLETED", ignoreCase = true)) {
+                        Log.d(TAG, "Provision tamamlandı callback tetiklendi")
+                        onProvisionCompleted?.invoke()
+                    }
+                }
+
+                meshController.onUnprovisionedNodeReady = { node ->
+                    onStatus("Capabilities geldi. Provision başlatılıyor...")
+                    meshController.startProvisioning(node)
+                }
+
+                try {
+                    meshController.identifyNode(deviceUuid, 5)
+                    onStatus("Identify gönderildi. ESP tarafında attention bekleniyor.")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Identify hatası", e)
+                    onStatus("Identify hatası: ${e.message}")
+                }
+            },
+            onDisconnected = {
+                Log.d(TAG, "PB-GATT bağlantısı koptu")
+                meshController.pduSender = null
+                onStatus("PB-GATT bağlantısı koptu.")
+            },
+            onDataReceived = { data ->
+                Log.d(TAG, "Provisioning RX: ${data.toHex()}")
+                meshController.handleIncomingProvisioningPdu(data)
+            },
+            onDataSent = { data ->
+                Log.d(TAG, "Provisioning TX sent: ${data.toHex()}")
+                meshController.handleProvisioningPduSent(data)
+            }
+        )
+
+        gattManager?.connectTo(bluetoothDevice)
+    }
+
+    @SuppressLint("MissingPermission")
+    fun connectToProxy(device: MeshScanResult) {
+        if (proxyConnected && activeProxyAddress == device.address && meshController.isProxyReady()) {
+            Log.d(TAG, "Proxy zaten bağlı, tekrar bağlanma atlandı: ${device.address}")
+            return
+        }
+
+        if (proxyConnecting && activeProxyAddress == device.address) {
+            Log.d(TAG, "Proxy bağlantısı zaten devam ediyor, tekrar bağlanma atlandı: ${device.address}")
+            return
+        }
+
+        Log.i(TAG, "PROXY_CONNECT_DEBUG START name=${device.name} mac=${device.address}")
+        onStatus("Proxy GATT bağlanıyor: ${device.name}")
+
+        proxyConnecting = true
+        proxyConnected = false
+        activeProxyAddress = device.address
+
+        clearGattOnly()
+        meshController.pduSender = null
+
+        val bluetoothManager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        val bluetoothDevice = bluetoothManager.adapter.getRemoteDevice(device.address)
+
+        gattManager = MeshGattManager(
+            context = context,
+            isProxy = true,
+            onConnected = {
+                Log.i(
+                    TAG,
+                    "PROXY_CONNECTED_DEBUG activeProxyMac=$activeProxyAddress name=${device.name} mac=${device.address}"
+                )
+
+                proxyConnecting = false
+                proxyConnected = true
+
+                onStatus("Proxy bağlandı! Ağ Config mesajları için hazır.")
+
+                meshController.pduSender = { pdu ->
+                    Log.i(TAG, "PROXY_PDU_SEND_DEBUG viaMac=$activeProxyAddress size=${pdu.size}")
+                    gattManager?.sendPdu(pdu)
+                }
+
+                Log.w(TAG, "PROXY FILTER ENABLED")
+                meshController.setupProxyFilter()
+
+
+                onProxyConnected?.invoke()
+            },
+            onDisconnected = {
+                Log.w(TAG, "PROXY_DISCONNECTED_DEBUG oldProxyMac=$activeProxyAddress")
+
+                proxyConnecting = false
+                proxyConnected = false
+
+                meshController.pduSender = null
+                onStatus("Proxy bağlantısı koptu.")
+                onProxyDisconnected?.invoke()
+            },
+            onDataReceived = { data ->
+                Log.i(TAG, "PROXY_RX_DEBUG fromMac=$activeProxyAddress size=${data.size} data=${data.toHex()}")
+                meshController.handleIncomingProvisioningPdu(data)
+            },
+            onDataSent = { data ->
+                Log.i(TAG, "PROXY_TX_SENT_DEBUG viaMac=$activeProxyAddress size=${data.size} data=${data.toHex()}")
+                meshController.handleProvisioningPduSent(data)
+            }
+        )
+
+        gattManager?.connectTo(bluetoothDevice)
+    }
+    fun disconnect() {
+        proxyConnecting = false
+        proxyConnected = false
+        activeProxyAddress = null
+
+        meshController.pduSender = null
+        gattManager?.closeConnection()
+        gattManager = null
+    }
+
+    private fun clearGattOnly() {
+        try {
+            gattManager?.closeConnection()
+        } catch (e: Exception) {
+            Log.w(TAG, "Eski GATT kapatılırken hata: ${e.message}")
+        }
+
+        gattManager = null
+    }
+
+    private fun ByteArray.toHex(): String {
+        return joinToString(" ") { "%02X".format(it) }
+    }
+
+    companion object {
+        private const val TAG = "MESH_PROVISIONER"
+    }
+}
+
+############################################################
+END FILE: mesh/MeshProvisioner.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshSetupOrchestrator.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshSetupOrchestrator.kt
+SUMMARY: Provision akışını koordine eden orchestration katmanı.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import com.example.prolightmesh.ble.BleScannerManager
+import com.example.prolightmesh.ble.MeshScanResult
+
+class MeshSetupOrchestrator(
+    private val scannerManagerProvider: () -> BleScannerManager,
+    private val meshProvisionerProvider: () -> MeshProvisioner,
+    private val onStatus: (String) -> Unit,
+    private val onReady: () -> Unit
+) {
+    private val handler = Handler(Looper.getMainLooper())
+    private val foundDevices = linkedMapOf<String, MeshScanResult>()
+
+    private var isRunning = false
+    private var configStarted = false
+
+    // YENİ: Şu an yeni bir cihaz mı kuruyoruz, yoksa uygulama yeni mi açıldı?
+    private var isProvisioningFlow = false
+
+    // SADECE AĞA BAĞLANMAK İÇİN KULLANILIR (Uygulama açılışında çalışır)
+    fun startProxySearch() {
+        if (isRunning) return
+        isRunning = true
+        configStarted = false
+        isProvisioningFlow = false // Normal açılış olduğunu belirtiyoruz
+        foundDevices.clear()
+
+        Log.d(TAG, "Ağ (Proxy) araması başladı")
+        scanForProxy()
+    }
+
+    // MANUEL SEÇİM: Sadece sen listeden tıkladığında çalışır
+    fun startManualProvisioning(device: MeshScanResult) {
+        isRunning = true
+        configStarted = false
+        isProvisioningFlow = true // Cihaz ekleme akışında olduğumuzu belirtiyoruz
+
+        onStatus("Hazırlanıyor...")
+        meshProvisionerProvider().provision(device)
+    }
+
+    fun onDeviceFound(device: MeshScanResult) {
+        foundDevices[device.address] = device
+    }
+
+    fun onProvisionCompleted() {
+        Log.d(TAG, "Orchestrator: Provision tamamlandı")
+        onStatus("✅ Ağa kaydedildi. Kontrol için yeniden bağlanılıyor...")
+
+        meshProvisionerProvider().disconnect()
+
+        handler.postDelayed({
+            foundDevices.clear()
+            scanForProxy()
+        }, 2500)
+    }
+
+    fun onProxyConnected() {
+        Log.d(TAG, "Orchestrator: Proxy bağlandı")
+
+        if (configStarted) return
+        configStarted = true
+
+        // YENİ: Duruma göre mantıklı ve şık bir durum mesajı veriyoruz
+        if (isProvisioningFlow) {
+            onStatus("✅ Ağa bağlanıldı. Işık ayarları yapılıyor...")
+        } else {
+            onStatus("✅ Sistem hazır. Fixtures kontrol edilebilir.")
+        }
+
+        handler.postDelayed({
+            isRunning = false
+            onReady()
+        }, 1000)
+    }
+
+    private fun scanForProxy() {
+        foundDevices.clear()
+        val scanner = scannerManagerProvider()
+
+        // Duruma göre tarama mesajı
+        if (isProvisioningFlow) {
+            onStatus("📡 Şifreleme bitti. Set ağına dönülüyor...")
+        } else {
+            onStatus("📡 Set ağına (Proxy) bağlanılıyor...")
+        }
+
+        scanner.startScan()
+
+        handler.postDelayed({
+            scanner.stopScan()
+
+            // Sadece önceden kaydedilmiş (isProvisioned = true) cihazları arar.
+            val proxyDevice = foundDevices.values.firstOrNull { it.isProvisioned }
+
+            if (proxyDevice != null) {
+                onStatus("🔗 Ağ bulundu. Bağlanılıyor: ${proxyDevice.name}")
+                meshProvisionerProvider().connectToProxy(proxyDevice)
+            } else {
+                isRunning = false
+                onStatus("❌ Ağ bulunamadı. Lütfen cihazların açık olduğundan emin olun.")
+            }
+        }, 6000)
+    }
+
+    companion object {
+        private const val TAG = "MESH_SETUP_ORCH"
+    }
+}
+
+############################################################
+END FILE: mesh/MeshSetupOrchestrator.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshGattManager.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshGattManager.kt
+SUMMARY: BLE GATT bağlantısı, servis keşfi, TX/RX taşıma katmanı.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCharacteristic
+import android.content.Context
+import android.util.Log
+import no.nordicsemi.android.ble.BleManager
+import no.nordicsemi.android.ble.data.Data
+import java.util.UUID
+
+class MeshGattManager(
+    context: Context,
+    private val isProxy: Boolean = false,
+    private val onConnected: () -> Unit,
+    private val onDisconnected: () -> Unit,
+    private val onDataReceived: (ByteArray) -> Unit,
+    private val onDataSent: (ByteArray) -> Unit
+) : BleManager(context) {
+
+    private var dataInCharacteristic: BluetoothGattCharacteristic? = null
+    private var dataOutCharacteristic: BluetoothGattCharacteristic? = null
+
+    private val serviceUuid = if (isProxy) MESH_PROXY_SERVICE_UUID else MESH_PROVISIONING_SERVICE_UUID
+    private val dataInUuid = if (isProxy) MESH_PROXY_DATA_IN_UUID else MESH_PROVISIONING_DATA_IN_UUID
+    private val dataOutUuid = if (isProxy) MESH_PROXY_DATA_OUT_UUID else MESH_PROVISIONING_DATA_OUT_UUID
+
+    override fun getGattCallback(): BleManagerGattCallback {
+        return object : BleManagerGattCallback() {
+
+            override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
+                val service = gatt.getService(serviceUuid)
+                dataInCharacteristic = service?.getCharacteristic(dataInUuid)
+                dataOutCharacteristic = service?.getCharacteristic(dataOutUuid)
+
+                val supported = dataInCharacteristic != null && dataOutCharacteristic != null
+                Log.d(TAG, "GATT service supported: $supported (isProxy=$isProxy)")
+                return supported
+            }
+
+            override fun initialize() {
+                setNotificationCallback(dataOutCharacteristic)
+                    .with { _, data ->
+                        val bytes = data.value ?: return@with
+                        Log.d(TAG, "RX: ${bytes.toHex()}")
+                        onDataReceived(bytes)
+                    }
+
+                enableNotifications(dataOutCharacteristic)
+                    .done {
+                        Log.d(TAG, "Notifications enabled")
+                        onConnected()
+                    }
+                    .enqueue()
+
+                requestMtu(517).enqueue()
+            }
+
+            override fun onServicesInvalidated() {
+                dataInCharacteristic = null
+                dataOutCharacteristic = null
+                onDisconnected()
+            }
+        }
+    }
+
+    fun connectTo(device: BluetoothDevice) {
+        Log.d(TAG, "Bağlanıyor (isProxy=$isProxy): ${device.address}")
+        connect(device).retry(3, 200).useAutoConnect(false).enqueue()
+    }
+
+    fun sendPdu(pdu: ByteArray) {
+        val characteristic = dataInCharacteristic ?: run {
+            Log.e(TAG, "Data In characteristic yok")
+            return
+        }
+
+        Log.d(TAG, "TX hazırlanıyor (${pdu.size} byte): ${pdu.toHex()}")
+
+        writeCharacteristic(
+            characteristic,
+            Data(pdu),
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        )
+            .split()
+            .done {
+                Log.d(TAG, "TX done: ${pdu.toHex()}")
+                onDataSent(pdu)
+            }
+            .fail { _, status ->
+                Log.e(TAG, "TX fail status=$status data=${pdu.toHex()}")
+            }
+            .enqueue()
+    }
+
+    fun closeConnection() {
+        disconnect().enqueue()
+    }
+
+    private fun ByteArray.toHex(): String {
+        return joinToString(" ") { "%02X".format(it) }
+    }
+
+    companion object {
+        private const val TAG = "MESH_GATT"
+
+        private val MESH_PROVISIONING_SERVICE_UUID: UUID = UUID.fromString("00001827-0000-1000-8000-00805f9b34fb")
+        private val MESH_PROVISIONING_DATA_IN_UUID: UUID = UUID.fromString("00002adb-0000-1000-8000-00805f9b34fb")
+        private val MESH_PROVISIONING_DATA_OUT_UUID: UUID = UUID.fromString("00002adc-0000-1000-8000-00805f9b34fb")
+
+        private val MESH_PROXY_SERVICE_UUID: UUID = UUID.fromString("00001828-0000-1000-8000-00805f9b34fb")
+        private val MESH_PROXY_DATA_IN_UUID: UUID = UUID.fromString("00002add-0000-1000-8000-00805f9b34fb")
+        private val MESH_PROXY_DATA_OUT_UUID: UUID = UUID.fromString("00002ade-0000-1000-8000-00805f9b34fb")
+    }
+}
+
+############################################################
+END FILE: mesh/MeshGattManager.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshController.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshController.kt
+SUMMARY: Nordic MeshManagerApi wrapper ve mesh PDU gönderim merkezi.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.content.Context
+import android.util.Log
+import no.nordicsemi.android.mesh.MeshManagerApi
+import no.nordicsemi.android.mesh.MeshManagerCallbacks
+import no.nordicsemi.android.mesh.MeshNetwork
+import no.nordicsemi.android.mesh.MeshProvisioningStatusCallbacks
+import no.nordicsemi.android.mesh.MeshStatusCallbacks
+import no.nordicsemi.android.mesh.provisionerstates.ProvisioningState
+import no.nordicsemi.android.mesh.provisionerstates.UnprovisionedMeshNode
+import no.nordicsemi.android.mesh.transport.ControlMessage
+import no.nordicsemi.android.mesh.transport.MeshMessage
+import no.nordicsemi.android.mesh.transport.ProvisionedMeshNode
+import no.nordicsemi.android.mesh.transport.ProxyConfigAddAddressToFilter
+import no.nordicsemi.android.mesh.transport.ProxyConfigSetFilterType
+import no.nordicsemi.android.mesh.utils.AddressArray
+import no.nordicsemi.android.mesh.utils.ProxyFilterType
+import java.util.UUID
+import android.os.Handler
+import android.os.Looper
+class MeshController(context: Context) {
+
+    val meshManagerApi = MeshManagerApi(context)
+
+    var pduSender: ((ByteArray) -> Unit)? = null
+    var onProvisioningStatus: ((String) -> Unit)? = null
+    var onUnprovisionedNodeReady: ((UnprovisionedMeshNode) -> Unit)? = null
+    var onMeshMessageReceived: ((Int, MeshMessage) -> Unit)? = null
+
+    var lastUnprovisionedNode: UnprovisionedMeshNode? = null
+
+    var onVendorStateReceived: ((Int, Char, Int) -> Unit)? = null
+
+    var onConfigMessageReceived: ((Int, String) -> Unit)? = null
+
+    private var currentMtu: Int = 20
+
+
+    init {
+
+
+
+        meshManagerApi.setMeshManagerCallbacks(object : MeshManagerCallbacks {
+            override fun onNetworkLoaded(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network yüklendi")
+                setupAppKeyIfNeeded(meshNetwork)
+            }
+
+            override fun onNetworkLoadFailed(error: String) {
+                Log.e(TAG, "Mesh network yüklenemedi: $error")
+            }
+
+            override fun onNetworkUpdated(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network güncellendi")
+            }
+
+            override fun onNetworkImported(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network import edildi")
+            }
+
+            override fun onNetworkImportFailed(error: String) {
+                Log.e(TAG, "Mesh network import hatası: $error")
+            }
+
+            override fun onMeshPduCreated(pdu: ByteArray) {
+                Log.d(TAG, "Mesh PDU oluşturuldu: ${pdu.toHex()}")
+                pduSender?.invoke(pdu)
+            }
+
+            override fun sendProvisioningPdu(meshNode: UnprovisionedMeshNode, pdu: ByteArray) {
+                Log.d(TAG, "Provisioning PDU oluşturuldu: ${pdu.toHex()}")
+                pduSender?.invoke(pdu)
+            }
+
+            override fun getMtu(): Int {
+                return currentMtu
+            }
+        })
+
+        meshManagerApi.setMeshStatusCallbacks(object : MeshStatusCallbacks {
+            override fun onTransactionFailed(dst: Int, hasIncompleteTimerExpired: Boolean) {
+                Log.e(TAG, "Transaction failed -> Dst: ${dst.toString(16)}")
+            }
+
+            override fun onUnknownPduReceived(src: Int, accessPayload: ByteArray?) {
+                val hex = accessPayload?.joinToString(" ") { "%02X".format(it) } ?: "null"
+                Log.w(TAG, "Unknown PDU received -> Src: 0x${src.toString(16)} Payload: $hex")
+            }
+
+            override fun onBlockAcknowledgementProcessed(dst: Int, message: ControlMessage) {}
+
+            override fun onBlockAcknowledgementReceived(src: Int, message: ControlMessage) {}
+
+            override fun onMeshMessageProcessed(dst: Int, meshMessage: MeshMessage) {
+                Log.d(TAG, "Mesh TX done -> dst: ${dst.toString(16)}, msg: ${meshMessage.javaClass.simpleName}")
+            }
+
+            override fun onMeshMessageReceived(src: Int, msg: MeshMessage) {
+                Log.d("MESH_DEBUG", "📥 MESAJ KAPIDA! Kimden: 0x${src.toString(16)} | Sinif: ${msg.javaClass.simpleName}")
+
+                var payload: ByteArray? = null
+
+                if (msg is no.nordicsemi.android.mesh.transport.VendorModelMessageStatus) {
+                    Log.d("MESH_DEBUG", "👉 Gelen mesaj STATUS tipi")
+                    payload = msg.parameters
+                } else if (msg is no.nordicsemi.android.mesh.transport.VendorModelMessageUnacked) {
+                    Log.d("MESH_DEBUG", "👉 Gelen mesaj UNACKED tipi")
+                    payload = msg.parameters
+                } else {
+
+                    val className = msg.javaClass.simpleName
+
+                    Log.d(
+                        "MESH_DEBUG",
+                        "📨 CONFIG/OTHER mesaj geldi -> $className"
+                    )
+
+                    when (className) {
+
+                        "ConfigAppKeyStatus",
+                        "ConfigModelAppStatus",
+                        "ConfigModelSubscriptionStatus",
+                        "ConfigModelPublicationStatus" -> {
+
+                            Log.i(
+                                "MESH_DEBUG",
+                                "✅ CONFIG ACK -> src=0x${src.toString(16)} type=$className"
+                            )
+
+                            onConfigMessageReceived?.invoke(src, className)
+                        }
+
+                        else -> {
+                            Log.d(
+                                "MESH_DEBUG",
+                                "❓ Bizi ilgilendirmeyen mesaj tipi: $className"
+                            )
+                        }
+                    }
+                }
+
+                if (payload != null && payload.size >= 3) {
+                    val type = payload[0].toInt().toChar()
+                    val value = ((payload[2].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+
+                    Log.i("MESH_DEBUG", "🔥 PAKET COZULDU -> Tip: $type, Deger: $value")
+                    onVendorStateReceived?.invoke(src, type, value)
+                } else if (payload != null) {
+                    Log.w("MESH_DEBUG", "⚠️ Payload var ama boyutu kucuk: ${payload.size}")
+                }
+
+                onMeshMessageReceived?.invoke(src, msg)
+            }
+
+            override fun onMessageDecryptionFailed(meshLayer: String?, errorMessage: String?) {
+                Log.e(TAG, "Decryption failed -> layer=$meshLayer error=$errorMessage")
+            }
+
+            override fun onHeartbeatMessageReceived(src: Int, message: ControlMessage) {
+                Log.d(TAG, "Heartbeat received -> Src: ${src.toString(16)}")
+            }
+        })
+
+        meshManagerApi.setProvisioningStatusCallbacks(object : MeshProvisioningStatusCallbacks {
+            override fun onProvisioningStateChanged(
+                meshNode: UnprovisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray?
+            ) {
+                lastUnprovisionedNode = meshNode
+                val msg = "Provision state: $state"
+                Log.d(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+
+                if (state.name.contains("CAPABILITIES", ignoreCase = true)) {
+                    Log.d(TAG, "Capabilities geldi. Node startProvisioning için hazır.")
+                    onUnprovisionedNodeReady?.invoke(meshNode)
+                }
+            }
+
+            override fun onProvisioningFailed(
+                meshNode: UnprovisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray
+            ) {
+                val msg = "Provision FAILED: $state / data: ${data.toHex()}"
+                Log.e(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+            }
+
+            override fun onProvisioningCompleted(
+                meshNode: ProvisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray
+            ) {
+                val msg = "Provision COMPLETED: $state / address: ${meshNode.unicastAddress}"
+                Log.d(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+            }
+        })
+
+        meshManagerApi.loadMeshNetwork()
+        Log.d(TAG, "MeshController başlatıldı. MTU: $currentMtu")
+    }
+
+    private fun setupAppKeyIfNeeded(network: MeshNetwork) {
+
+        try {
+            network.setGlobalTtl(7)
+
+            Log.i(
+                TAG,
+                "TTL_DEBUG global TTL set to ${network.getGlobalTtl()}"
+            )
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "TTL_DEBUG global TTL set failed: ${e.message}",
+                e
+            )
+        }
+
+        if (network.appKeys.isEmpty()) {
+
+            val appKey = network.createAppKey()
+            network.addAppKey(appKey)
+
+            Log.d(
+                TAG,
+                "Ağ için yeni AppKey oluşturuldu: ${appKey.keyIndex}"
+            )
+
+        } else {
+
+            Log.d(
+                TAG,
+                "Ağda mevcut AppKey var: ${network.appKeys[0].keyIndex}"
+            )
+        }
+    }
+    /**
+     * Proxy GATT bağlantısı kurulduktan sonra çağırılır.
+     * Telefonun cevapları alabilmesi için Proxy Filter'a provisioner adresini ve ana grup adresini ekler.
+     */
+
+
+    fun setupProxyFilter() {
+        val network = meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "PROXY_FILTER_DEBUG ayarlanamadı: network yok")
+            return
+        }
+
+        val provisionerAddress = network.provisionerAddress ?: run {
+            Log.e(TAG, "PROXY_FILTER_DEBUG ayarlanamadı: provisioner address yok")
+            return
+        }
+
+        val groupAddress = MeshConfigurator.GROUP_ALL_LIGHTS
+        val handler = Handler(Looper.getMainLooper())
+
+        try {
+            Log.i(TAG, "PROXY_FILTER_DEBUG ===== START =====")
+            Log.i(TAG, "PROXY_FILTER_DEBUG provisioner=0x${provisionerAddress.toString(16)}")
+            Log.i(TAG, "PROXY_FILTER_DEBUG group=0x${groupAddress.toString(16)}")
+            Log.i(TAG, "PROXY_FILTER_DEBUG nodeCount=${network.nodes.size}")
+
+            val setInclusionFilter = ProxyConfigSetFilterType(
+                ProxyFilterType(ProxyFilterType.INCLUSION_LIST_FILTER)
+            )
+
+            Log.i(TAG, "PROXY_FILTER_DEBUG SetFilterType -> INCLUSION")
+            meshManagerApi.createMeshPdu(provisionerAddress, setInclusionFilter)
+
+            val addresses = mutableListOf<Int>()
+
+            addresses.add(provisionerAddress)
+
+            network.nodes.forEach { node ->
+                Log.i(
+                    TAG,
+                    "PROXY_FILTER_DEBUG node=${node.nodeName} unicast=0x${node.unicastAddress.toString(16)} elements=${node.elements.size}"
+                )
+
+                if (node.unicastAddress != provisionerAddress) {
+                    addresses.add(node.unicastAddress)
+                }
+            }
+
+            addresses.add(groupAddress)
+
+            var delay = 300L
+
+            addresses.forEach { address ->
+                handler.postDelayed({
+                    Log.i(TAG, "PROXY_FILTER_DEBUG AddAddress single -> 0x${address.toString(16)}")
+
+                    val addAddress = ProxyConfigAddAddressToFilter(
+                        listOf(toAddressArray(address))
+                    )
+
+                    meshManagerApi.createMeshPdu(provisionerAddress, addAddress)
+                }, delay)
+
+                delay += 300L
+            }
+
+            handler.postDelayed({
+                Log.i(TAG, "PROXY_FILTER_DEBUG totalAddressAdded=${addresses.size}")
+                Log.i(TAG, "PROXY_FILTER_DEBUG ===== DONE =====")
+            }, delay + 100L)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "PROXY_FILTER_DEBUG hata: ${e.message}", e)
+        }
+    }
+
+    private fun toAddressArray(address: Int): AddressArray {
+        val high = ((address shr 8) and 0xFF).toByte()
+        val low = (address and 0xFF).toByte()
+        return AddressArray(high, low)
+    }
+
+    fun handleIncomingProvisioningPdu(pdu: ByteArray) {
+        try {
+            meshManagerApi.handleNotifications(currentMtu, pdu)
+        } catch (e: NullPointerException) {
+            Log.w(
+                TAG,
+                "Nordic SDK proxy parse NPE yakalandi, paket ignore edildi: ${pdu.joinToString(" ") { "%02X".format(it) }}"
+            )
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "Mesh notification parse hatasi: ${e.message}, pdu=${pdu.joinToString(" ") { "%02X".format(it) }}",
+                e
+            )
+        }
+    }
+
+    fun handleProvisioningPduSent(pdu: ByteArray) {
+        meshManagerApi.handleWriteCallbacks(currentMtu, pdu)
+    }
+
+    fun identifyNode(deviceUuid: UUID, attentionSeconds: Int = 5) {
+        meshManagerApi.identifyNode(deviceUuid, attentionSeconds)
+    }
+
+    fun startProvisioning(meshNode: UnprovisionedMeshNode) {
+        val network = meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "Provision başlatılamadı: Mesh network yok")
+            onProvisioningStatus?.invoke("❌ Mesh network yok")
+            return
+        }
+
+        try {
+            val capabilities = meshNode.provisioningCapabilities
+            val elementCount = (capabilities?.numberOfElements ?: 1).toInt()
+            val provisioner = network.selectedProvisioner
+
+            val nextAddress = network.nextAvailableUnicastAddress(elementCount, provisioner)
+            network.assignUnicastAddress(nextAddress)
+
+            Log.i(TAG, "Yeni node için unicast atandı: 0x${nextAddress.toString(16)}")
+            onProvisioningStatus?.invoke("Node adresi atandı: 0x${nextAddress.toString(16)}")
+
+            meshManagerApi.startProvisioning(meshNode)
+        } catch (e: Exception) {
+            Log.e(TAG, "Provision address atama hatası: ${e.message}", e)
+            onProvisioningStatus?.invoke("❌ Provision address hatası: ${e.message}")
+        }
+    }
+
+    fun isProxyReady(): Boolean {
+        return pduSender != null
+    }
+
+    fun sendMeshMessage(dstAddress: Int, msg: MeshMessage) {
+        try {
+            Log.i(
+                TAG,
+                "SEQ_DEBUG BEFORE TX -> dst=0x${dstAddress.toString(16)} msg=${msg.javaClass.simpleName} seq=${dumpSequenceNumbers()}"
+            )
+
+            meshManagerApi.createMeshPdu(dstAddress, msg)
+
+            Log.i(
+                TAG,
+                "SEQ_DEBUG AFTER TX -> dst=0x${dstAddress.toString(16)} msg=${msg.javaClass.simpleName} seq=${dumpSequenceNumbers()}"
+            )
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Mesaj PDU OLUŞTURMA HATASI: ${e.message}", e)
+            onProvisioningStatus?.invoke("❌ SİSTEM HATASI: ${e.message}")
+        }
+    }
+
+    private fun dumpSequenceNumbers(): String {
+        val network = meshManagerApi.meshNetwork ?: return "network=null"
+        val sparse = network.sequenceNumbers ?: return "sequenceNumbers=null"
+
+        if (sparse.size() == 0) {
+            return "empty"
+        }
+
+        return buildString {
+            append("[")
+            for (i in 0 until sparse.size()) {
+                val key = sparse.keyAt(i)
+                val value = sparse.valueAt(i)
+
+                append("0x${key.toString(16)}=$value")
+
+                if (i < sparse.size() - 1) {
+                    append(", ")
+                }
+            }
+            append("]")
+        }
+    }
+
+    private fun ByteArray.toHex(): String {
+        return joinToString(" ") { "%02X".format(it) }
+    }
+
+    companion object {
+        private const val TAG = "MESH_CORE"
+    }
+}
+
+############################################################
+END FILE: mesh/MeshController.kt
+############################################################
+
+
+############################################################
+FILE: ui/screens/NewDeviceScreen.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/screens/NewDeviceScreen.kt
+SUMMARY: Yeni cihaz arama ve provision başlatma ekranı.
+############################################################
+
+package com.example.prolightmesh.ui.screens
+
+import android.app.Activity
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.example.prolightmesh.ble.MeshScanResult
+import com.example.prolightmesh.ui.components.RadarScannerView
+import com.example.prolightmesh.ui.theme.ProColors
+
+class NewDeviceScreen(
+    private val activity: Activity,
+    private val onScanClicked: (RadarScannerView) -> Unit,
+    private val onDeviceClicked: (MeshScanResult) -> Unit
+) {
+    val rootView: ScrollView
+
+    private val statusText: TextView
+    private val radarView: RadarScannerView
+    private val deviceListLayout: LinearLayout
+    private val scanButton: Button
+
+    init {
+        val container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 64, 48, 48)
+            setBackgroundColor(ProColors.Background)
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+
+        val title = TextView(activity).apply {
+            text = "CİHAZ EKLE"
+            textSize = 24f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextPrimary)
+            setPadding(0, 0, 0, 16)
+        }
+
+        statusText = TextView(activity).apply {
+            text = "Etraftaki Pro-Light cihazları aranmaya hazır."
+            textSize = 14f
+            setTextColor(ProColors.TextSecondary)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 48)
+        }
+
+        radarView = RadarScannerView(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(400, 400).apply {
+                setMargins(0, 0, 0, 48)
+            }
+        }
+
+        scanButton = Button(activity).apply {
+            text = "TARAMAYI BAŞLAT"
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.Background)
+            setBackgroundColor(ProColors.Primary)
+            setPadding(0, 32, 0, 32)
+            setOnClickListener { onScanClicked(radarView) }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, 48)
+            }
+        }
+
+        deviceListLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        container.addView(title)
+        container.addView(statusText)
+        container.addView(radarView)
+        container.addView(scanButton)
+        container.addView(deviceListLayout)
+
+        rootView = ScrollView(activity).apply {
+            isFillViewport = true
+            setBackgroundColor(ProColors.Background)
+            addView(container)
+        }
+    }
+
+    fun setStatus(text: String) {
+        statusText.text = text
+    }
+
+    fun setScanEnabled(enabled: Boolean) {
+        scanButton.isEnabled = enabled
+        scanButton.alpha = if (enabled) 1.0f else 0.5f
+        scanButton.text = if (enabled) "TARAMAYI BAŞLAT" else "TARANIYOR..."
+    }
+
+    fun resetLists() {
+        deviceListLayout.removeAllViews()
+        radarView.stopScanning()
+    }
+
+    fun startRadar() {
+        radarView.startScanning()
+    }
+
+    fun stopRadar() {
+        radarView.stopScanning()
+    }
+
+    fun addDevice(result: MeshScanResult) {
+        if (deviceListLayout.findViewWithTag<android.view.View>(result.address) != null) {
+            return
+        }
+
+        val deviceCard = LinearLayout(activity).apply {
+            tag = result.address
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(ProColors.Surface)
+            isClickable = true
+
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, 16)
+            }
+
+            addView(TextView(activity).apply {
+                text = result.name
+                textSize = 18f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(ProColors.TextPrimary)
+            })
+
+            addView(TextView(activity).apply {
+                text = "MAC: ${result.address} | RSSI: ${result.rssi}"
+                textSize = 14f
+                setTextColor(ProColors.TextSecondary)
+            })
+
+            setOnClickListener {
+                onDeviceClicked(result)
+            }
+        }
+
+        deviceListLayout.addView(deviceCard)
+    }
+
+    fun removeDevice(macAddress: String) {
+        val viewToRemove = deviceListLayout.findViewWithTag<android.view.View>(macAddress)
+
+        if (viewToRemove != null) {
+            deviceListLayout.removeView(viewToRemove)
+        }
+    }
+}
+
+############################################################
+END FILE: ui/screens/NewDeviceScreen.kt
+############################################################
+
+
+############################################################
+FILE: ui/dialogs/ProvisionProgressDialog.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/dialogs/ProvisionProgressDialog.kt
+SUMMARY: Provision ilerleme UI dialog.
+############################################################
+
+package com.example.prolightmesh.ui.dialogs
+
+import android.app.AlertDialog
+import android.content.Context
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.view.Gravity
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
+import com.example.prolightmesh.ui.theme.ProColors
+
+class ProvisionProgressDialog(context: Context) {
+    private val dialog: AlertDialog
+    private val statusText: TextView
+
+    init {
+        val layout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setPadding(80, 80, 80, 80)
+            setBackgroundColor(ProColors.Surface) // Koyu antrasit arka plan
+
+            val spinner = ProgressBar(context).apply {
+                isIndeterminate = true
+                // Spinner rengini elektrik mavisi yapıyoruz
+                progressTintList = ColorStateList.valueOf(ProColors.Primary)
+                indeterminateTintList = ColorStateList.valueOf(ProColors.Primary)
+            }
+
+            statusText = TextView(context).apply {
+                text = "Ağa bağlanıyor..."
+                textSize = 16f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(ProColors.TextPrimary)
+                gravity = Gravity.CENTER
+                setPadding(0, 48, 0, 0)
+            }
+
+            addView(spinner)
+            addView(statusText)
+        }
+
+        dialog = AlertDialog.Builder(context)
+            .setView(layout)
+            .setCancelable(false) // Kurulum sırasında iptal edilmesini engeller
+            .create()
+
+        // Köşelerin keskin durmaması için standart beyaz arkaplanı siliyoruz
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+    }
+
+    fun show() {
+        if (!dialog.isShowing) dialog.show()
+    }
+
+    fun updateStatus(message: String) {
+        statusText.text = message
+    }
+
+    fun dismiss() {
+        if (dialog.isShowing) dialog.dismiss()
+    }
+}
+
+############################################################
+END FILE: ui/dialogs/ProvisionProgressDialog.kt
+############################################################
+
+
+############################################################
+FILE: ui/dialogs/DeviceSetupDialog.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/dialogs/DeviceSetupDialog.kt
+SUMMARY: Provision sonrası cihaz setup dialog.
+############################################################
+
+package com.example.prolightmesh.ui.dialogs
+
+import android.app.AlertDialog
+import android.content.Context
+import android.content.res.ColorStateList
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.*
+import com.example.prolightmesh.storage.StoredGroup
+import com.example.prolightmesh.ui.theme.ProColors
+
+class DeviceSetupDialog(
+    context: Context,
+    private val groups: List<StoredGroup>,
+    // YENİ: Artık tek bir Int değil, seçilen grupların listesini (List<Int>) döndürüyor
+    private val onSetupComplete: (deviceName: String, selectedGroups: List<Int>) -> Unit
+) {
+    private val dialog: AlertDialog
+
+    init {
+        val layout = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(64, 80, 64, 64)
+            setBackgroundColor(ProColors.Surface)
+        }
+
+        val titleText = TextView(context).apply {
+            text = "Cihaz Başarıyla Eklendi!"
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.Success)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 48)
+        }
+
+        val nameLabel = TextView(context).apply {
+            text = "Işığın Adı:"
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 0, 0, 16)
+        }
+
+        val nameInput = EditText(context).apply {
+            hint = "Örn: Key Light 1"
+            setHintTextColor(Color.DKGRAY)
+            setTextColor(ProColors.TextPrimary)
+            setBackgroundColor(ProColors.Background)
+            setPadding(32, 32, 32, 32)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 0, 0, 48) }
+        }
+
+        val groupLabel = TextView(context).apply {
+            text = "Hangi gruplara dahil edilecek? (Çoklu Seçim)"
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 0, 0, 16)
+        }
+
+        // YENİ: RadioGroup yerine standart LinearLayout kullandık
+        val checkBoxesContainer = LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+        }
+
+        // Seçilenleri takip etmek için checkbox'ları bir listede tutuyoruz
+        val checkBoxList = mutableListOf<CheckBox>()
+
+        groups.forEachIndexed { index, group ->
+            val cb = CheckBox(context).apply {
+                text = group.name
+                setTextColor(ProColors.TextPrimary)
+                tag = group.address // Grubun adresini kimlik (tag) olarak saklıyoruz
+                setPadding(16, 24, 16, 24)
+                buttonTintList = ColorStateList.valueOf(ProColors.Primary)
+
+                // Varsayılan olarak ilk grubu (Genelde "Tüm Işıklar" olur) ve
+                // eğer sadece 2 grup varsa ikincisini de seçili getir.
+                // Şefler her ışığın Master grubunda olmasını ister.
+                if (index == 0) isChecked = true
+            }
+            checkBoxList.add(cb)
+            checkBoxesContainer.addView(cb)
+        }
+
+        val saveButton = Button(context).apply {
+            text = "KAYDET VE BİTİR"
+            setTextColor(Color.BLACK)
+            setBackgroundColor(ProColors.Primary)
+            setTypeface(null, Typeface.BOLD)
+            setPadding(0, 32, 0, 32)
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply { setMargins(0, 48, 0, 0) }
+
+            setOnClickListener {
+                val inputName = nameInput.text.toString().trim()
+                val finalName = if (inputName.isNotEmpty()) inputName else "PRO-NODE"
+
+                // İşaretli olan checkbox'ların tag'lerini (adreslerini) topla
+                val selectedGroupAddresses = checkBoxList
+                    .filter { it.isChecked }
+                    .map { it.tag as Int }
+
+                // Eğer kullanıcı hiçbir grubu seçmezse çökmemesi için güvenlik önlemi
+                val finalGroups = if (selectedGroupAddresses.isNotEmpty()) {
+                    selectedGroupAddresses
+                } else {
+                    listOf(groups.first().address) // Hiçbir şey seçmezse mecburen Master gruba at
+                }
+
+                onSetupComplete(finalName, finalGroups)
+                dismiss()
+            }
+        }
+
+        layout.addView(titleText)
+        layout.addView(nameLabel)
+        layout.addView(nameInput)
+        layout.addView(groupLabel)
+        layout.addView(checkBoxesContainer)
+        layout.addView(saveButton)
+
+        dialog = AlertDialog.Builder(context)
+            .setView(layout)
+            .setCancelable(false)
+            .create()
+
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+    }
+
+    fun show() {
+        dialog.show()
+    }
+
+    private fun dismiss() {
+        if (dialog.isShowing) dialog.dismiss()
+    }
+}
+
+############################################################
+END FILE: ui/dialogs/DeviceSetupDialog.kt
+############################################################
+

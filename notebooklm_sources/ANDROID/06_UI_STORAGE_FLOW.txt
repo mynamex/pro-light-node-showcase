@@ -1,0 +1,2003 @@
+============================================================
+ANDROID 06 UI STORAGE FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: ui/navigation/AppNavigator.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/navigation/AppNavigator.kt
+SUMMARY: Screen navigation.
+############################################################
+
+package com.example.prolightmesh.ui.navigation
+
+import android.app.Activity
+import android.graphics.Color
+import android.view.View
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import com.example.prolightmesh.ui.screens.GroupsScreen
+import com.example.prolightmesh.ui.screens.NetworkScreen
+import com.example.prolightmesh.ui.screens.NewDeviceScreen
+import com.example.prolightmesh.ui.screens.WorkScreen
+
+class AppNavigator(
+    private val activity: Activity,
+    private val bottomNavView: BottomNavView,
+    private val workScreen: WorkScreen,
+    private val networkScreen: NetworkScreen,
+    private val groupsScreen: GroupsScreen,
+    private val newDeviceScreen: NewDeviceScreen // YENİ: ScanView yerine NewDeviceScreen geldi
+) {
+
+    enum class Screen {
+        GROUPS,
+        NETWORK,
+        WORK,
+        NEW_DEVICE
+        // DETAIL silindi, çünkü artık diyalog kullanıyoruz
+    }
+
+    var currentScreen: Screen = Screen.WORK
+        private set
+
+    fun showWork() {
+        currentScreen = Screen.WORK
+        showWithBottomNav(workScreen.rootView)
+    }
+
+    fun showGroups() {
+        currentScreen = Screen.GROUPS
+        showWithBottomNav(groupsScreen.rootView)
+    }
+
+    fun showNetwork() {
+        currentScreen = Screen.NETWORK
+        showWithBottomNav(networkScreen.rootView)
+    }
+
+    fun showNewDevice() {
+        currentScreen = Screen.NEW_DEVICE
+        showWithBottomNav(newDeviceScreen.rootView)
+    }
+
+    private fun showWithBottomNav(contentView: View) {
+        val root = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setBackgroundColor(Color.parseColor("#121212")) // Zifiri antrasit arkaplan
+        }
+
+        val contentContainer = FrameLayout(activity).apply {
+            (contentView.parent as? android.view.ViewGroup)?.removeView(contentView)
+            addView(contentView)
+        }
+
+        root.addView(
+            contentContainer,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                0,
+                1f
+            )
+        )
+
+        (bottomNavView.rootView.parent as? android.view.ViewGroup)
+            ?.removeView(bottomNavView.rootView)
+
+        root.addView(
+            bottomNavView.rootView,
+            LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            )
+        )
+
+        activity.setContentView(root)
+    }
+}
+
+############################################################
+END FILE: ui/navigation/AppNavigator.kt
+############################################################
+
+
+############################################################
+FILE: ui/navigation/BottomNavView.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/navigation/BottomNavView.kt
+SUMMARY: Bottom nav UI.
+############################################################
+
+package com.example.prolightmesh.ui.navigation
+
+import android.app.Activity
+import android.graphics.Color
+import android.view.Gravity
+import android.widget.Button
+import android.widget.LinearLayout
+
+class BottomNavView(
+    private val activity: Activity,
+    private val onGroupsClicked: () -> Unit,
+    private val onNetworkClicked: () -> Unit,
+    private val onWorkClicked: () -> Unit,
+    private val onNewDeviceClicked: () -> Unit
+) {
+    val rootView: LinearLayout
+
+    init {
+        rootView = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.rgb(12, 12, 12))
+            setPadding(8, 8, 8, 8)
+
+            addView(navButton("Gruplar", onGroupsClicked))
+            addView(navButton("Network", onNetworkClicked))
+            addView(navButton("Work", onWorkClicked))
+            addView(navButton("Yeni Cihaz", onNewDeviceClicked))
+        }
+    }
+
+    private fun navButton(textValue: String, onClick: () -> Unit): Button {
+        return Button(activity).apply {
+            text = textValue
+            textSize = 12f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.rgb(35, 35, 35))
+            setOnClickListener { onClick() }
+
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                LinearLayout.LayoutParams.WRAP_CONTENT,
+                1f
+            ).apply {
+                setMargins(4, 0, 4, 0)
+            }
+        }
+    }
+}
+
+############################################################
+END FILE: ui/navigation/BottomNavView.kt
+############################################################
+
+
+############################################################
+FILE: ui/screens/GroupsScreen.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/screens/GroupsScreen.kt
+SUMMARY: Group management screen.
+############################################################
+
+package com.example.prolightmesh.ui.screens
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.graphics.Color
+import android.graphics.Typeface
+import android.text.InputType
+import android.view.Gravity
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.example.prolightmesh.storage.StoredGroup
+
+class GroupsScreen(
+    private val activity: Activity,
+    private val onAddGroup: (String) -> Unit,
+    private val onDeleteGroup: (StoredGroup) -> Unit
+) {
+    val rootView: ScrollView
+
+    private val container: LinearLayout
+    private val statusText: TextView
+
+    init {
+        container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 48, 32, 32)
+            setBackgroundColor(Color.rgb(20, 20, 20))
+        }
+
+        val title = TextView(activity).apply {
+            text = "GRUPLAR"
+            textSize = 26f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 12)
+        }
+
+        statusText = TextView(activity).apply {
+            text = "Işık grupları"
+            textSize = 14f
+            setTextColor(Color.GREEN)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 24)
+        }
+
+        val addButton = Button(activity).apply {
+            text = "➕ GRUP OLUŞTUR"
+            textSize = 16f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(Color.rgb(60, 90, 150))
+            setPadding(0, 28, 0, 28)
+            setOnClickListener { showAddGroupDialog() }
+        }
+
+        container.addView(title)
+        container.addView(statusText)
+        container.addView(addButton)
+
+        rootView = ScrollView(activity).apply {
+            isFillViewport = true
+            addView(container)
+        }
+    }
+
+    fun renderGroups(groups: List<StoredGroup>) {
+        clearGroupRows()
+
+        statusText.text = "${groups.size} grup"
+
+        groups.forEach { group ->
+            container.addView(groupRow(group))
+        }
+    }
+
+    private fun groupRow(group: StoredGroup): LinearLayout {
+        return LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(24, 24, 24, 24)
+            setBackgroundColor(Color.rgb(35, 35, 35))
+
+            val title = TextView(activity).apply {
+                text = group.name
+                textSize = 18f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+            }
+
+            val subtitle = TextView(activity).apply {
+                text = "Adres: 0x${group.address.toString(16)}"
+                textSize = 14f
+                setTextColor(Color.LTGRAY)
+                setPadding(0, 6, 0, 12)
+            }
+
+            val deleteButton = Button(activity).apply {
+                text = "🗑 SİL"
+                setTextColor(Color.WHITE)
+                setBackgroundColor(Color.rgb(130, 0, 0))
+                setOnClickListener { onDeleteGroup(group) }
+
+                isEnabled = group.address != 0xC000
+                alpha = if (group.address == 0xC000) 0.4f else 1f
+            }
+
+            addView(title)
+            addView(subtitle)
+            addView(deleteButton)
+
+            layoutParams = LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 24, 0, 0)
+            }
+        }
+    }
+
+    private fun clearGroupRows() {
+        while (container.childCount > 3) {
+            container.removeViewAt(3)
+        }
+    }
+
+    private fun showAddGroupDialog() {
+        val input = EditText(activity).apply {
+            hint = "Örn: Key Light"
+            inputType = InputType.TYPE_CLASS_TEXT
+        }
+
+        AlertDialog.Builder(activity)
+            .setTitle("Yeni Grup")
+            .setMessage("Grup adını gir:")
+            .setView(input)
+            .setPositiveButton("Oluştur") { _, _ ->
+                val name = input.text.toString().trim()
+                if (name.isNotBlank()) {
+                    onAddGroup(name)
+                }
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+}
+
+############################################################
+END FILE: ui/screens/GroupsScreen.kt
+############################################################
+
+
+############################################################
+FILE: ui/screens/NetworkScreen.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/screens/NetworkScreen.kt
+SUMMARY: Network screen.
+############################################################
+
+package com.example.prolightmesh.ui.screens
+
+import android.app.Activity
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.example.prolightmesh.ui.components.DeviceMiniCard
+import com.example.prolightmesh.ui.theme.ProColors
+
+class NetworkScreen(
+    private val activity: Activity
+) {
+    val rootView: ScrollView
+    private val container: LinearLayout
+    private val statusText: TextView
+
+    init {
+        container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 64, 40, 40)
+            setBackgroundColor(ProColors.Background)
+        }
+
+        val title = TextView(activity).apply {
+            text = "CİHAZ AĞI"
+            textSize = 24f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextPrimary)
+            gravity = Gravity.CENTER
+        }
+
+        statusText = TextView(activity).apply {
+            text = "Bağlı cihazlar yükleniyor..."
+            textSize = 14f
+            setTextColor(ProColors.TextSecondary)
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 48)
+        }
+
+        container.addView(title)
+        container.addView(statusText)
+
+        rootView = ScrollView(activity).apply {
+            isFillViewport = true
+            setBackgroundColor(ProColors.Background)
+            addView(container)
+        }
+    }
+
+    fun setStatus(text: String) {
+        statusText.text = text
+    }
+
+    fun addNodeCard(card: DeviceMiniCard) {
+        container.addView(card)
+    }
+
+    fun clear() {
+        // Title ve StatusText hariç diğer cihazları sil (ilk 2 view kalır)
+        while (container.childCount > 2) {
+            container.removeViewAt(2)
+        }
+    }
+}
+
+############################################################
+END FILE: ui/screens/NetworkScreen.kt
+############################################################
+
+
+############################################################
+FILE: ui/screens/NewDeviceScreen.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/screens/NewDeviceScreen.kt
+SUMMARY: New device screen.
+############################################################
+
+package com.example.prolightmesh.ui.screens
+
+import android.app.Activity
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.example.prolightmesh.ble.MeshScanResult
+import com.example.prolightmesh.ui.components.RadarScannerView
+import com.example.prolightmesh.ui.theme.ProColors
+
+class NewDeviceScreen(
+    private val activity: Activity,
+    private val onScanClicked: (RadarScannerView) -> Unit,
+    private val onDeviceClicked: (MeshScanResult) -> Unit
+) {
+    val rootView: ScrollView
+
+    private val statusText: TextView
+    private val radarView: RadarScannerView
+    private val deviceListLayout: LinearLayout
+    private val scanButton: Button
+
+    init {
+        val container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(48, 64, 48, 48)
+            setBackgroundColor(ProColors.Background)
+            gravity = Gravity.CENTER_HORIZONTAL
+        }
+
+        val title = TextView(activity).apply {
+            text = "CİHAZ EKLE"
+            textSize = 24f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextPrimary)
+            setPadding(0, 0, 0, 16)
+        }
+
+        statusText = TextView(activity).apply {
+            text = "Etraftaki Pro-Light cihazları aranmaya hazır."
+            textSize = 14f
+            setTextColor(ProColors.TextSecondary)
+            gravity = Gravity.CENTER
+            setPadding(0, 0, 0, 48)
+        }
+
+        radarView = RadarScannerView(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(400, 400).apply {
+                setMargins(0, 0, 0, 48)
+            }
+        }
+
+        scanButton = Button(activity).apply {
+            text = "TARAMAYI BAŞLAT"
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.Background)
+            setBackgroundColor(ProColors.Primary)
+            setPadding(0, 32, 0, 32)
+            setOnClickListener { onScanClicked(radarView) }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, 48)
+            }
+        }
+
+        deviceListLayout = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        container.addView(title)
+        container.addView(statusText)
+        container.addView(radarView)
+        container.addView(scanButton)
+        container.addView(deviceListLayout)
+
+        rootView = ScrollView(activity).apply {
+            isFillViewport = true
+            setBackgroundColor(ProColors.Background)
+            addView(container)
+        }
+    }
+
+    fun setStatus(text: String) {
+        statusText.text = text
+    }
+
+    fun setScanEnabled(enabled: Boolean) {
+        scanButton.isEnabled = enabled
+        scanButton.alpha = if (enabled) 1.0f else 0.5f
+        scanButton.text = if (enabled) "TARAMAYI BAŞLAT" else "TARANIYOR..."
+    }
+
+    fun resetLists() {
+        deviceListLayout.removeAllViews()
+        radarView.stopScanning()
+    }
+
+    fun startRadar() {
+        radarView.startScanning()
+    }
+
+    fun stopRadar() {
+        radarView.stopScanning()
+    }
+
+    fun addDevice(result: MeshScanResult) {
+        if (deviceListLayout.findViewWithTag<android.view.View>(result.address) != null) {
+            return
+        }
+
+        val deviceCard = LinearLayout(activity).apply {
+            tag = result.address
+            orientation = LinearLayout.VERTICAL
+            setPadding(32, 32, 32, 32)
+            setBackgroundColor(ProColors.Surface)
+            isClickable = true
+
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, 16)
+            }
+
+            addView(TextView(activity).apply {
+                text = result.name
+                textSize = 18f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(ProColors.TextPrimary)
+            })
+
+            addView(TextView(activity).apply {
+                text = "MAC: ${result.address} | RSSI: ${result.rssi}"
+                textSize = 14f
+                setTextColor(ProColors.TextSecondary)
+            })
+
+            setOnClickListener {
+                onDeviceClicked(result)
+            }
+        }
+
+        deviceListLayout.addView(deviceCard)
+    }
+
+    fun removeDevice(macAddress: String) {
+        val viewToRemove = deviceListLayout.findViewWithTag<android.view.View>(macAddress)
+
+        if (viewToRemove != null) {
+            deviceListLayout.removeView(viewToRemove)
+        }
+    }
+}
+
+############################################################
+END FILE: ui/screens/NewDeviceScreen.kt
+############################################################
+
+
+############################################################
+FILE: ui/screens/WorkScreen.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/screens/WorkScreen.kt
+SUMMARY: Work screen.
+############################################################
+
+package com.example.prolightmesh.ui.screens
+
+import android.app.Activity
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.example.prolightmesh.storage.StoredGroup
+import com.example.prolightmesh.ui.components.GroupFolderCard
+import com.example.prolightmesh.ui.components.ProSlider
+import com.example.prolightmesh.ui.theme.ProColors
+import com.example.prolightmesh.ui.work.WorkGroupControlDialog
+
+class WorkScreen(
+    private val activity: Activity,
+    private val onGlobalDimChanged: (Int) -> Unit,
+    private val onGroupColorChanged: (Int, Int, Int, Int) -> Unit,
+    private val onGroupDimChanged: (Int, Int) -> Unit,
+    private val onGroupEffectChanged: (Int, Int) -> Unit,
+    private val onGroupFanModeChanged: (Int, Int) -> Unit
+) {
+    val rootView: ScrollView
+    private val container: LinearLayout
+    private val statusText: TextView
+    private val groupsContainer: LinearLayout
+
+    init {
+        container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 64, 40, 40)
+            setBackgroundColor(ProColors.Background)
+        }
+
+        val title = TextView(activity).apply {
+            text = "SAHNE KONTROLÜ"
+            textSize = 24f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextPrimary)
+            gravity = Gravity.CENTER
+        }
+
+        statusText = TextView(activity).apply {
+            text = "Sistem Hazır"
+            textSize = 14f
+            setTextColor(ProColors.Success)
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 48)
+        }
+
+        val globalSlider = ProSlider(
+            context = activity,
+            title = "GLOBAL MASTER DIMMER",
+            maxValue = 1023,
+            initialValue = 0,
+            onValueChanged = { dimValue -> onGlobalDimChanged(dimValue) }
+        )
+
+        val separator = android.view.View(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                2
+            ).apply {
+                setMargins(0, 32, 0, 32)
+            }
+            setBackgroundColor(ProColors.SurfaceLight)
+        }
+
+        val groupsTitle = TextView(activity).apply {
+            text = "GRUPLAR"
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 0, 0, 24)
+        }
+
+        groupsContainer = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        container.addView(title)
+        container.addView(statusText)
+        container.addView(globalSlider)
+        container.addView(separator)
+        container.addView(groupsTitle)
+        container.addView(groupsContainer)
+
+        rootView = ScrollView(activity).apply {
+            isFillViewport = true
+            setBackgroundColor(ProColors.Background)
+            addView(container)
+        }
+    }
+
+    fun setStatus(text: String) {
+        statusText.text = text
+    }
+
+    fun renderGroups(groups: List<StoredGroup>) {
+        groupsContainer.removeAllViews()
+
+        groups.forEach { group ->
+            val folderCard = GroupFolderCard(
+                context = activity,
+                groupName = group.name,
+                addressHex = "0x${group.address.toString(16)}",
+                onClick = { showGroupControlPanel(group) }
+            )
+            groupsContainer.addView(folderCard)
+        }
+    }
+
+    private fun showGroupControlPanel(group: StoredGroup) {
+        WorkGroupControlDialog(
+            activity = activity,
+            group = group,
+            onStatus = { message -> setStatus(message) },
+            onGroupColorChanged = onGroupColorChanged,
+            onGroupDimChanged = onGroupDimChanged,
+            onGroupEffectChanged = onGroupEffectChanged,
+            onGroupFanModeChanged = onGroupFanModeChanged
+        ).show()
+    }
+}
+
+############################################################
+END FILE: ui/screens/WorkScreen.kt
+############################################################
+
+
+############################################################
+FILE: ui/components/ColorWheelPanel.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/components/ColorWheelPanel.kt
+SUMMARY: Color wheel UI component.
+############################################################
+
+package com.example.prolightmesh.ui.components
+
+import android.annotation.SuppressLint
+import android.content.Context
+import android.graphics.*
+import android.view.MotionEvent
+import android.view.View
+import com.example.prolightmesh.ui.theme.ProColors
+import kotlin.math.atan2
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.sin
+
+class ColorWheelPanel(
+    context: Context,
+    private val onColorSelected: (r: Int, g: Int, b: Int) -> Unit
+) : View(context) {
+
+    private val wheelPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val pointerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val pointerOutlinePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    private var centerX = 0f
+    private var centerY = 0f
+    private var radius = 0f
+
+    // Seçilen noktanın koordinatları
+    private var pointerX = 0f
+    private var pointerY = 0f
+
+    init {
+        pointerPaint.color = Color.WHITE
+        pointerPaint.style = Paint.Style.FILL
+
+        pointerOutlinePaint.color = ProColors.Background
+        pointerOutlinePaint.style = Paint.Style.STROKE
+        pointerOutlinePaint.strokeWidth = 6f
+
+        minimumHeight = 500
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        centerX = w / 2f
+        centerY = h / 2f
+        radius = (Math.min(w, h) / 2f) * 0.85f // Biraz boşluk bırak
+
+        // Hue (Renk) için 360 derecelik SweepGradient
+        val colors = intArrayOf(
+            Color.RED, Color.MAGENTA, Color.BLUE, Color.CYAN,
+            Color.GREEN, Color.YELLOW, Color.RED
+        )
+        val sweepGradient = SweepGradient(centerX, centerY, colors, null)
+
+        // Saturation (Doygunluk) için merkezden dışa beyazdan saydama RadialGradient
+        val radialGradient = RadialGradient(
+            centerX, centerY, radius,
+            Color.WHITE, 0x00FFFFFF, Shader.TileMode.CLAMP
+        )
+
+        // İki gradient'i birleştir (Multiply modu ile)
+        val composeShader = ComposeShader(sweepGradient, radialGradient, PorterDuff.Mode.SRC_OVER)
+        wheelPaint.shader = composeShader
+
+        // Başlangıç noktası (Merkez = Beyaz)
+        pointerX = centerX
+        pointerY = centerY
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+        // Renk çarkını çiz
+        canvas.drawCircle(centerX, centerY, radius, wheelPaint)
+
+        // Seçici imleci (Pointer) çiz
+        canvas.drawCircle(pointerX, pointerY, 24f, pointerPaint)
+        canvas.drawCircle(pointerX, pointerY, 24f, pointerOutlinePaint)
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        val x = event.x
+        val y = event.y
+
+        when (event.action) {
+            MotionEvent.ACTION_DOWN, MotionEvent.ACTION_MOVE, MotionEvent.ACTION_UP -> {
+                // Dokunulan noktanın merkeze uzaklığı ve açısı
+                val dx = x - centerX
+                val dy = y - centerY
+                val distance = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+
+                // Çemberin dışına çıkmayı engelle
+                if (distance <= radius) {
+                    pointerX = x
+                    pointerY = y
+                } else {
+                    val ratio = radius / distance
+                    pointerX = centerX + dx * ratio
+                    pointerY = centerY + dy * ratio
+                }
+
+                invalidate() // Çizimi güncelle
+
+                // ACTION_UP (parmak çekildiğinde) rengi hesapla ve ESP'ye yolla
+                if (event.action == MotionEvent.ACTION_UP) {
+                    calculateColorAndTrigger()
+                }
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+
+    private fun calculateColorAndTrigger() {
+        val dx = pointerX - centerX
+        val dy = pointerY - centerY
+        val distance = hypot(dx.toDouble(), dy.toDouble()).toFloat()
+
+        // Hue (0-360) hesapla
+        var angle = Math.toDegrees(atan2(dy.toDouble(), dx.toDouble())).toFloat()
+        if (angle < 0) angle += 360f
+
+        // Saturation (0-1) hesapla
+        val saturation = distance / radius
+
+        // Value sabit 1.0 (Parlaklık master dim ile kontrol edilecek)
+        val hsv = floatArrayOf(angle, saturation, 1f)
+        val color = Color.HSVToColor(hsv)
+
+        // 1023 formatına (ESP PWM formatı) çevir
+        val r = (Color.red(color) / 255f * 1023).toInt()
+        val g = (Color.green(color) / 255f * 1023).toInt()
+        val b = (Color.blue(color) / 255f * 1023).toInt()
+
+        // Seçilen rengi göstergeye ver
+        pointerPaint.color = color
+        invalidate()
+
+        onColorSelected(r, g, b)
+    }
+}
+
+############################################################
+END FILE: ui/components/ColorWheelPanel.kt
+############################################################
+
+
+############################################################
+FILE: ui/components/DeviceMiniCard.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/components/DeviceMiniCard.kt
+SUMMARY: Mini device card.
+############################################################
+
+package com.example.prolightmesh.ui.components
+
+import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.View
+import android.view.ViewGroup
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.example.prolightmesh.ui.theme.ProColors
+
+class DeviceMiniCard(
+    context: Context,
+    name: String,
+    addressHex: String,
+    dimValue: Int,
+    onSettingsClicked: () -> Unit,
+    onPingClicked: () -> Unit
+) : LinearLayout(context) {
+
+    enum class OnlineState {
+        CHECKING,
+        ONLINE,
+        STALE,
+        OFFLINE
+    }
+
+    private val statusDot: View
+    private val statusText: TextView
+
+
+    private val signalText: TextView
+
+
+    init {
+        orientation = HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(32, 24, 32, 24)
+
+        background = GradientDrawable().apply {
+            setColor(ProColors.Surface)
+            cornerRadius = 24f
+        }
+
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(0, 0, 0, 24)
+        }
+
+        statusDot = View(context).apply {
+            layoutParams = LinearLayout.LayoutParams(24, 24).apply {
+                setMargins(0, 0, 32, 0)
+            }
+            background = GradientDrawable().apply {
+                shape = GradientDrawable.OVAL
+                setColor(Color.DKGRAY)
+            }
+        }
+
+        statusText = TextView(context).apply {
+            text = "Kontrol ediliyor..."
+            textSize = 12f
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 4, 0, 0)
+        }
+
+        signalText = TextView(context).apply {
+            text = "Sinyal: Bilinmiyor"
+            textSize = 12f
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 4, 0, 0)
+        }
+
+        val textContainer = LinearLayout(context).apply {
+            orientation = VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                0,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                1f
+            )
+
+            addView(TextView(context).apply {
+                text = name
+                textSize = 16f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(ProColors.TextPrimary)
+            })
+
+            addView(TextView(context).apply {
+                text = "ADDR: $addressHex | Dim: $dimValue"
+                textSize = 12f
+                setTextColor(ProColors.TextSecondary)
+                setPadding(0, 4, 0, 0)
+            })
+
+            addView(statusText)
+            addView(signalText)
+        }
+
+        val settingsBtn = Button(context).apply {
+            text = "⋮"
+            textSize = 20f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.Primary)
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener { onSettingsClicked() }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val pingBtn = Button(context).apply {
+            text = "Ping"
+            textSize = 12f
+            setTextColor(ProColors.Primary)
+            setBackgroundColor(Color.TRANSPARENT)
+            setOnClickListener { onPingClicked() }
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val buttonColumn = LinearLayout(context).apply {
+            orientation = VERTICAL
+            gravity = Gravity.CENTER
+            addView(settingsBtn)
+            addView(pingBtn)
+        }
+
+        addView(statusDot)
+        addView(textContainer)
+        addView(buttonColumn)
+
+        setOnlineState(OnlineState.CHECKING)
+    }
+
+    fun setOnlineStatus(isOnline: Boolean) {
+        setOnlineState(if (isOnline) OnlineState.ONLINE else OnlineState.OFFLINE)
+    }
+
+    fun setOnlineState(state: OnlineState) {
+        val bg = statusDot.background as GradientDrawable
+
+        when (state) {
+            OnlineState.CHECKING -> {
+                bg.setColor(Color.DKGRAY)
+                statusText.text = "Kontrol ediliyor..."
+                statusText.setTextColor(ProColors.TextSecondary)
+            }
+
+            OnlineState.ONLINE -> {
+                bg.setColor(ProColors.Success)
+                statusText.text = "Online"
+                statusText.setTextColor(ProColors.Success)
+            }
+
+            OnlineState.STALE -> {
+                bg.setColor(Color.rgb(255, 170, 0))
+                statusText.text = "Zayıf / eski cevap"
+                statusText.setTextColor(Color.rgb(255, 170, 0))
+            }
+
+            OnlineState.OFFLINE -> {
+                bg.setColor(Color.rgb(160, 40, 40))
+                statusText.text = "Offline"
+                statusText.setTextColor(Color.rgb(160, 40, 40))
+            }
+        }
+    }
+
+
+    fun setSignalRssi(rssi: Int) {
+        when {
+            rssi <= -100 -> {
+                signalText.text = "Sinyal: Bilinmiyor"
+                signalText.setTextColor(ProColors.TextSecondary)
+            }
+
+            rssi >= -60 -> {
+                signalText.text = "Sinyal: Güçlü ($rssi dBm)"
+                signalText.setTextColor(ProColors.Success)
+            }
+
+            rssi >= -75 -> {
+                signalText.text = "Sinyal: Orta ($rssi dBm)"
+                signalText.setTextColor(Color.rgb(255, 170, 0))
+            }
+
+            else -> {
+                signalText.text = "Sinyal: Zayıf ($rssi dBm)"
+                signalText.setTextColor(Color.rgb(160, 40, 40))
+            }
+        }
+    }
+}
+
+############################################################
+END FILE: ui/components/DeviceMiniCard.kt
+############################################################
+
+
+############################################################
+FILE: ui/components/GroupFolderCard.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/components/GroupFolderCard.kt
+SUMMARY: Group folder card.
+############################################################
+
+package com.example.prolightmesh.ui.components
+
+import android.content.Context
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.example.prolightmesh.ui.theme.ProColors
+
+class GroupFolderCard(
+    context: Context,
+    groupName: String,
+    addressHex: String,
+    onClick: () -> Unit
+) : LinearLayout(context) {
+
+    init {
+        orientation = VERTICAL
+        gravity = Gravity.CENTER_VERTICAL
+        setPadding(48, 48, 48, 48)
+
+        background = GradientDrawable().apply {
+            setColor(ProColors.SurfaceLight)
+            cornerRadius = 32f
+            setStroke(2, ProColors.Surface) // Hafif bir sınır çizgisi
+        }
+
+        layoutParams = LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        ).apply {
+            setMargins(0, 0, 0, 32)
+        }
+
+        // Klasör İkonu + Başlık Yan Yana
+        val headerLayout = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+
+            addView(TextView(context).apply {
+                text = "📁"
+                textSize = 24f
+                setPadding(0, 0, 24, 0)
+            })
+
+            addView(TextView(context).apply {
+                text = groupName
+                textSize = 18f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(ProColors.TextPrimary)
+            })
+        }
+
+        // Alt Bilgi
+        val subText = TextView(context).apply {
+            text = "Grup Adresi: $addressHex"
+            textSize = 14f
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 16, 0, 0)
+        }
+
+        addView(headerLayout)
+        addView(subText)
+
+        // Tıklama animasyonu ve aksiyonu
+        isClickable = true
+        isFocusable = true
+        setOnClickListener { onClick() }
+    }
+}
+
+############################################################
+END FILE: ui/components/GroupFolderCard.kt
+############################################################
+
+
+############################################################
+FILE: ui/components/NodeCardView.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/components/NodeCardView.kt
+SUMMARY: Node card view.
+############################################################
+
+package com.example.prolightmesh.ui.components
+
+import android.app.Activity
+import android.graphics.Color
+import android.graphics.Typeface
+import android.view.Gravity
+import android.widget.Button
+import android.widget.LinearLayout
+import android.widget.TextView
+
+class NodeCardView(
+    activity: Activity,
+    name: String,
+    address: String,
+    groupsText: String,
+    masterDim: Int, // YENİ EKLENDİ
+    red: Int,       // YENİ EKLENDİ
+    green: Int,     // YENİ EKLENDİ
+    blue: Int,      // YENİ EKLENDİ
+    onRed: () -> Unit,
+    onGreen: () -> Unit,
+    onBlue: () -> Unit,
+    onWhite: () -> Unit,
+    onConfig: () -> Unit,
+    onForget: () -> Unit
+) {
+
+    val rootView: LinearLayout = LinearLayout(activity).apply {
+        orientation = LinearLayout.VERTICAL
+        setPadding(32, 32, 32, 32)
+        setBackgroundColor(Color.rgb(35, 35, 35))
+
+        addView(TextView(activity).apply {
+            text = name
+            textSize = 18f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(Color.WHITE)
+        })
+
+        addView(TextView(activity).apply {
+            text = "Adres: $address"
+            textSize = 14f
+            setTextColor(Color.LTGRAY)
+        })
+
+        addView(TextView(activity).apply {
+            text = "Gruplar: $groupsText"
+            textSize = 14f
+            setTextColor(Color.rgb(120, 220, 120))
+            setPadding(0, 8, 0, 8)
+        })
+
+        // YENİ EKLENDİ: CANLI STATE GÖSTERİMİ
+        addView(TextView(activity).apply {
+            text = "Dim: $masterDim | RGB: ($red, $green, $blue)"
+            textSize = 14f
+            setTypeface(null, Typeface.ITALIC)
+            setTextColor(Color.rgb(200, 200, 200))
+            setPadding(0, 0, 0, 16)
+        })
+
+        val colorRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+        }
+
+        colorRow.addView(colorBtn(activity, "🔴", Color.RED, onRed))
+        colorRow.addView(colorBtn(activity, "🟢", Color.GREEN, onGreen))
+        colorRow.addView(colorBtn(activity, "🔵", Color.BLUE, onBlue))
+        colorRow.addView(colorBtn(activity, "⚪", Color.LTGRAY, onWhite))
+        addView(colorRow)
+
+        val actionRow = LinearLayout(activity).apply {
+            orientation = LinearLayout.HORIZONTAL
+        }
+
+        actionRow.addView(actionBtn(activity, "⚙️ Ayarla", onConfig))
+        actionRow.addView(actionBtn(activity, "🗑 Sil", onForget))
+        addView(actionRow)
+    }
+
+    private fun colorBtn(activity: Activity, text: String, color: Int, onClick: () -> Unit): Button {
+        return Button(activity).apply {
+            this.text = text
+            setBackgroundColor(color)
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(0, 120, 1f).apply {
+                setMargins(8, 16, 8, 16)
+            }
+        }
+    }
+
+    private fun actionBtn(activity: Activity, text: String, onClick: () -> Unit): Button {
+        return Button(activity).apply {
+            this.text = text
+            setOnClickListener { onClick() }
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+                setMargins(8, 16, 8, 0)
+            }
+        }
+    }
+}
+
+############################################################
+END FILE: ui/components/NodeCardView.kt
+############################################################
+
+
+############################################################
+FILE: ui/components/ProSlider.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/components/ProSlider.kt
+SUMMARY: Custom slider.
+############################################################
+
+package com.example.prolightmesh.ui.components
+
+import android.content.Context
+import android.content.res.ColorStateList
+import android.graphics.Typeface
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.SeekBar
+import android.widget.TextView
+import com.example.prolightmesh.ui.theme.ProColors
+
+class ProSlider(
+    context: Context,
+    title: String,
+    maxValue: Int = 1023,
+    initialValue: Int = 0,
+    private val onValueChanged: (Int) -> Unit
+) : LinearLayout(context) {
+
+    private val valueText: TextView
+
+    init {
+        orientation = VERTICAL
+        setPadding(0, 16, 0, 32)
+        layoutParams = LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
+        // Üst Başlık ve Değer Gösterimi (Örn: "MASTER DIM     %45")
+        val headerLayout = LinearLayout(context).apply {
+            orientation = HORIZONTAL
+            layoutParams = LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(16, 0, 16, 16)
+            }
+        }
+
+        val titleText = TextView(context).apply {
+            text = title
+            textSize = 14f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextSecondary)
+            layoutParams = LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+        }
+
+        valueText = TextView(context).apply {
+            text = "$initialValue"
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.Primary)
+        }
+
+        headerLayout.addView(titleText)
+        headerLayout.addView(valueText)
+
+        // Özel SeekBar (Slider)
+        val seekBar = SeekBar(context).apply {
+            max = maxValue
+            progress = initialValue
+
+            // Modern kalın tasarım için SeekBar renk ayarları
+            progressTintList = ColorStateList.valueOf(ProColors.Primary)
+            thumbTintList = ColorStateList.valueOf(ProColors.TextPrimary)
+            progressBackgroundTintList = ColorStateList.valueOf(ProColors.SurfaceLight)
+
+            setPadding(24, 16, 24, 16)
+
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
+                    valueText.text = "$progress"
+                }
+
+                override fun onStartTrackingTouch(seekBar: SeekBar?) {}
+
+                override fun onStopTrackingTouch(seekBar: SeekBar?) {
+                    onValueChanged(progress)
+                }
+            })
+        }
+
+        addView(headerLayout)
+        addView(seekBar)
+    }
+}
+
+############################################################
+END FILE: ui/components/ProSlider.kt
+############################################################
+
+
+############################################################
+FILE: ui/components/RadarScannerView.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/components/RadarScannerView.kt
+SUMMARY: Radar scan UI.
+############################################################
+
+package com.example.prolightmesh.ui.components
+
+import android.animation.ValueAnimator
+import android.content.Context
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.view.View
+import android.view.animation.LinearInterpolator
+import com.example.prolightmesh.ui.theme.ProColors
+
+class RadarScannerView(context: Context) : View(context) {
+
+    private val radarPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = ProColors.Primary
+        style = Paint.Style.STROKE
+        strokeWidth = 4f
+    }
+
+    private val centerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = ProColors.Primary
+        style = Paint.Style.FILL
+    }
+
+    private var radiusProgress = 0f
+    private var scanAnimator: ValueAnimator? = null
+
+    init {
+        // En az 300x300 piksel boyutlarında olmasını sağlıyoruz
+        minimumWidth = 300
+        minimumHeight = 300
+    }
+
+    fun startScanning() {
+        if (scanAnimator?.isRunning == true) return
+
+        scanAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = 2000 // 2 saniyelik yavaş, profesyonel tarama efekti
+            repeatCount = ValueAnimator.INFINITE
+            interpolator = LinearInterpolator()
+            addUpdateListener { animator ->
+                radiusProgress = animator.animatedValue as Float
+                invalidate() // Ekranı yeniden çiz
+            }
+            start()
+        }
+    }
+
+    fun stopScanning() {
+        scanAnimator?.cancel()
+        radiusProgress = 0f
+        invalidate()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        super.onDraw(canvas)
+
+        val cx = width / 2f
+        val cy = height / 2f
+        val maxRadius = (Math.min(width, height) / 2f) * 0.9f
+
+        // Merkez nokta
+        canvas.drawCircle(cx, cy, 12f, centerPaint)
+
+        // Büyüyen dalga 1
+        radarPaint.alpha = ((1f - radiusProgress) * 255).toInt()
+        canvas.drawCircle(cx, cy, maxRadius * radiusProgress, radarPaint)
+
+        // Büyüyen dalga 2 (Yarım periyot geriden gelen ikinci dalga)
+        val progress2 = (radiusProgress + 0.5f) % 1f
+        radarPaint.alpha = ((1f - progress2) * 255).toInt()
+        canvas.drawCircle(cx, cy, maxRadius * progress2, radarPaint)
+    }
+
+    override fun onDetachedFromWindow() {
+        super.onDetachedFromWindow()
+        stopScanning()
+    }
+}
+
+############################################################
+END FILE: ui/components/RadarScannerView.kt
+############################################################
+
+
+############################################################
+FILE: storage/MeshLocalStore.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/storage/MeshLocalStore.kt
+SUMMARY: Local persistence.
+############################################################
+
+package com.example.prolightmesh.storage
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import android.util.Log
+class MeshLocalStore(context: Context) {
+
+    private val prefs = context.getSharedPreferences("pro_light_mesh_store", Context.MODE_PRIVATE)
+
+    fun getGroups(): List<StoredGroup> {
+        val raw = prefs.getString(KEY_GROUPS, null)
+
+        if (raw.isNullOrBlank()) {
+            return listOf(StoredGroup("Tüm Işıklar", DEFAULT_ALL_LIGHTS_GROUP))
+        }
+
+        val array = JSONArray(raw)
+        val groups = mutableListOf<StoredGroup>()
+
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            groups.add(
+                StoredGroup(
+                    name = obj.getString("name"),
+                    address = obj.getInt("address")
+                )
+            )
+        }
+
+        return groups
+    }
+
+    fun removeNodeFromGroup(nodeAddress: Int, groupAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+
+        nodes[index] = node.copy(
+            groupAddresses = node.groupAddresses.filter { it != groupAddress }
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun saveGroups(groups: List<StoredGroup>) {
+        val array = JSONArray()
+
+        groups.forEach { group ->
+            array.put(
+                JSONObject()
+                    .put("name", group.name)
+                    .put("address", group.address)
+            )
+        }
+
+        prefs.edit().putString(KEY_GROUPS, array.toString()).apply()
+    }
+
+    fun addGroup(name: String): StoredGroup {
+        val groups = getGroups().toMutableList()
+        val group = StoredGroup(name, findNextGroupAddress(groups))
+
+        groups.add(group)
+        saveGroups(groups)
+
+        return group
+    }
+
+    fun deleteGroup(address: Int) {
+        if (address == DEFAULT_ALL_LIGHTS_GROUP) return
+
+        saveGroups(getGroups().filter { it.address != address })
+
+        val updatedNodes = getNodes().map { node ->
+            node.copy(groupAddresses = node.groupAddresses.filter { it != address })
+        }
+
+        saveNodes(updatedNodes)
+    }
+
+    fun getNodes(): List<StoredNode> {
+        val raw = prefs.getString(KEY_NODES, null) ?: return emptyList()
+        val array = JSONArray(raw)
+        val nodes = mutableListOf<StoredNode>()
+
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val groupArray = obj.optJSONArray("groupAddresses") ?: JSONArray()
+
+            val groups = mutableListOf<Int>()
+            for (g in 0 until groupArray.length()) {
+                groups.add(groupArray.getInt(g))
+            }
+
+            val macAddress = if (obj.has("macAddress") && !obj.isNull("macAddress")) {
+                obj.optString("macAddress")
+                    .takeIf { it.isNotBlank() && it != "null" }
+            } else {
+                null
+            }
+
+            nodes.add(
+                StoredNode(
+                    unicastAddress = obj.getInt("unicastAddress"),
+                    name = obj.optString("name", "PRO-NODE"),
+                    groupAddresses = groups,
+                    macAddress = macAddress,
+
+                    red = obj.optInt("red", 0),
+                    green = obj.optInt("green", 0),
+                    blue = obj.optInt("blue", 0),
+                    masterDim = obj.optInt("masterDim", 0),
+
+                    lastSeen = obj.optLong("lastSeen", 0L),
+                    lastSeenByScan = obj.optLong(
+                        "lastSeenByScan",
+                        obj.optLong("lastSeen", 0L)
+                    ),
+                    lastSeenByMesh = obj.optLong("lastSeenByMesh", 0L),
+                    lastRssi = obj.optInt("lastRssi", -100),
+
+                    pendingDelete = obj.optBoolean("pendingDelete", false),
+                    pendingDeleteAt = obj.optLong("pendingDeleteAt", 0L),
+                    pendingResetLastAttemptAt = obj.optLong("pendingResetLastAttemptAt", 0L),
+                    pendingResetAttemptCount = obj.optInt("pendingResetAttemptCount", 0)
+                )
+            )
+        }
+
+        return nodes
+    }
+    fun saveNodes(nodes: List<StoredNode>) {
+        val array = JSONArray()
+
+        nodes.forEach { node ->
+            val groupArray = JSONArray()
+            node.groupAddresses.forEach { groupArray.put(it) }
+
+            val obj = JSONObject()
+                .put("unicastAddress", node.unicastAddress)
+                .put("name", node.name)
+                .put("groupAddresses", groupArray)
+                .put("red", node.red)
+                .put("green", node.green)
+                .put("blue", node.blue)
+                .put("masterDim", node.masterDim)
+                .put("lastSeen", node.lastSeen)
+                .put("lastSeenByScan", node.lastSeenByScan)
+                .put("lastSeenByMesh", node.lastSeenByMesh)
+                .put("lastRssi", node.lastRssi)
+                .put("pendingDelete", node.pendingDelete)
+                .put("pendingDeleteAt", node.pendingDeleteAt)
+                .put("pendingResetLastAttemptAt", node.pendingResetLastAttemptAt)
+                .put("pendingResetAttemptCount", node.pendingResetAttemptCount)
+
+            // 🔥 KRİTİK: null ise hiç yazma
+            if (!node.macAddress.isNullOrBlank()) {
+                obj.put("macAddress", node.macAddress)
+            }
+
+            array.put(obj)
+        }
+
+        prefs.edit().putString(KEY_NODES, array.toString()).apply()
+    }
+
+    fun upsertNode(node: StoredNode) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == node.unicastAddress }
+
+        if (index >= 0) {
+            nodes[index] = node
+        } else {
+            nodes.add(node)
+        }
+
+        saveNodes(nodes)
+    }
+
+    fun addNodeToGroup(
+        nodeAddress: Int,
+        nodeName: String,
+        groupAddress: Int,
+        macAddress: String? = null
+    ) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index >= 0) {
+            val node = nodes[index]
+            val updatedGroups = (node.groupAddresses + groupAddress).distinct()
+
+            nodes[index] = node.copy(
+                name = nodeName,
+                groupAddresses = updatedGroups,
+                macAddress = macAddress ?: node.macAddress
+            )
+        } else {
+            nodes.add(
+                StoredNode(
+                    unicastAddress = nodeAddress,
+                    name = nodeName,
+                    groupAddresses = listOf(groupAddress),
+                    macAddress = macAddress
+                )
+            )
+        }
+
+        saveNodes(nodes)
+    }
+
+    fun removeNode(nodeAddress: Int) {
+        saveNodes(getNodes().filter { it.unicastAddress != nodeAddress })
+    }
+
+    fun getNode(nodeAddress: Int): StoredNode? {
+        return getNodes().firstOrNull { it.unicastAddress == nodeAddress }
+    }
+
+    // YENİ: Node statelerini tek bir harf komutuna göre güncelleyen fonksiyon
+    fun updateNodeState(nodeAddress: Int, type: Char, value: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        val updatedNode = when (type) {
+            'M' -> node.copy(masterDim = value, lastSeen = now, lastSeenByMesh = now)
+            'R' -> node.copy(red = value, lastSeen = now, lastSeenByMesh = now)
+            'G' -> node.copy(green = value, lastSeen = now, lastSeenByMesh = now)
+            'B' -> node.copy(blue = value, lastSeen = now, lastSeenByMesh = now)
+            'P' -> node.copy(lastSeen = now, lastSeenByMesh = now)
+            else -> node.copy(lastSeen = now, lastSeenByMesh = now)
+        }
+
+        nodes[index] = updatedNode
+        saveNodes(nodes)
+    }
+    fun updateLastSeen(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        nodes[index] = nodes[index].copy(
+            lastSeen = System.currentTimeMillis()
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun updateLastSeenByScanByMac(macAddress: String, rssi: Int) {
+        val nodes = getNodes().toMutableList()
+
+        val index = nodes.indexOfFirst {
+            it.macAddress.equals(macAddress, ignoreCase = true)
+        }
+
+        if (index < 0) {
+
+            Log.e(
+                "SCAN_PRESENCE",
+                "❌ MAC eşleşmedi incoming=$macAddress"
+            )
+
+            nodes.forEach {
+
+                Log.e(
+                    "SCAN_PRESENCE",
+                    "KNOWN NODE addr=0x${it.unicastAddress.toString(16)} mac=${it.macAddress}"
+                )
+            }
+
+            return
+        }
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        // Aynı node çok sık gelirse store/UI spam olmasın
+        if (now - node.lastSeenByScan < 1500L) {
+            return
+        }
+
+        val rssiDiff = kotlin.math.abs(rssi - node.lastRssi)
+
+        nodes[index] = node.copy(
+            lastSeen = now,
+            lastSeenByScan = now,
+
+            // RSSI küçük değiştiyse eski RSSI kalsın, ama lastSeen güncellensin
+            lastRssi = if (rssiDiff >= 5) rssi else node.lastRssi
+        )
+
+        Log.e(
+            "SCAN_PRESENCE",
+            "✅ SCAN UPDATE MAC addr=0x${node.unicastAddress.toString(16)} mac=$macAddress rssi=$rssi"
+        )
+
+        saveNodes(nodes)
+    }
+    fun updateLastSeenByScanByNodeAddress(nodeAddress: Int, rssi: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        // Aynı node çok sık gelirse store/UI spam olmasın
+        if (now - node.lastSeenByScan < 1500L) {
+            return
+        }
+
+        val rssiDiff = kotlin.math.abs(rssi - node.lastRssi)
+
+        nodes[index] = node.copy(
+            lastSeen = now,
+            lastSeenByScan = now,
+
+            // RSSI küçük değiştiyse eski RSSI kalsın, ama lastSeen güncellensin
+            lastRssi = if (rssiDiff >= 5) rssi else node.lastRssi
+        )
+
+        Log.e(
+            "SCAN_PRESENCE",
+            "✅ SCAN UPDATE ADDR addr=0x${nodeAddress.toString(16)} rssi=$rssi"
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun updateLastSeenByMesh(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+
+        nodes[index] = nodes[index].copy(
+            lastSeen = now,
+            lastSeenByMesh = now
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun markNodePendingDelete(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+
+        nodes[index] = nodes[index].copy(
+            pendingDelete = true,
+            pendingDeleteAt = now
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun getPendingDeleteNodeByMac(macAddress: String): StoredNode? {
+        return getNodes().firstOrNull {
+            it.pendingDelete &&
+                    it.macAddress.equals(macAddress, ignoreCase = true)
+        }
+    }
+
+    fun markPendingResetAttempt(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+        val node = nodes[index]
+
+        nodes[index] = node.copy(
+            pendingResetLastAttemptAt = now,
+            pendingResetAttemptCount = node.pendingResetAttemptCount + 1
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun canAttemptPendingReset(nodeAddress: Int): Boolean {
+        val node = getNode(nodeAddress) ?: return false
+        val now = System.currentTimeMillis()
+
+        if (!node.pendingDelete) return false
+
+        // Aynı cihaza 30 saniyeden sık reset denemeyelim
+        return now - node.pendingResetLastAttemptAt > 30_000L
+    }
+
+    fun debugBindKnownMacs() {
+        val nodes = getNodes().toMutableList()
+
+        for (i in nodes.indices) {
+            nodes[i] = when (nodes[i].unicastAddress) {
+                0x0002 -> nodes[i].copy(macAddress = "1C:DB:D4:5E:9A:36")
+                0x0004 -> nodes[i].copy(macAddress = "3C:DC:75:6E:8B:FE")
+                else -> nodes[i]
+            }
+        }
+
+        saveNodes(nodes)
+    }
+
+
+    fun getMacByNodeAddress(nodeAddress: Int): String? {
+        return getNodes()
+            .firstOrNull { it.unicastAddress == nodeAddress }
+            ?.macAddress
+    }
+
+    private fun findNextGroupAddress(groups: List<StoredGroup>): Int {
+        var address = DEFAULT_ALL_LIGHTS_GROUP + 1
+        val used = groups.map { it.address }.toSet()
+
+        while (used.contains(address)) {
+            address++
+        }
+
+        return address
+    }
+
+    companion object {
+        const val DEFAULT_ALL_LIGHTS_GROUP = 0xC000
+
+        private const val KEY_GROUPS = "groups"
+        private const val KEY_NODES = "nodes"
+    }
+}
+
+############################################################
+END FILE: storage/MeshLocalStore.kt
+############################################################
+
+
+############################################################
+FILE: storage/StoredNode.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/storage/StoredNode.kt
+SUMMARY: Stored node model.
+############################################################
+
+package com.example.prolightmesh.storage
+
+data class StoredNode(
+    val unicastAddress: Int,
+    val name: String,
+    val groupAddresses: List<Int>,
+
+    val macAddress: String? = null,
+
+    val red: Int = 0,
+    val green: Int = 0,
+    val blue: Int = 0,
+    val masterDim: Int = 0,
+
+    val lastSeen: Long = 0L,
+
+    val lastSeenByScan: Long = 0L,
+    val lastSeenByMesh: Long = 0L,
+    val lastRssi: Int = -100,
+
+    // Offline silinen ama ESP'ye reset gönderilmemiş cihazlar
+    val pendingDelete: Boolean = false,
+    val pendingDeleteAt: Long = 0L,
+    val pendingResetLastAttemptAt: Long = 0L,
+    val pendingResetAttemptCount: Int = 0
+)
+
+############################################################
+END FILE: storage/StoredNode.kt
+############################################################
+
+
+############################################################
+FILE: storage/StoredGroup.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/storage/StoredGroup.kt
+SUMMARY: Stored group model.
+############################################################
+
+package com.example.prolightmesh.storage
+
+data class StoredGroup(
+    val name: String,
+    val address: Int
+)
+
+############################################################
+END FILE: storage/StoredGroup.kt
+############################################################
+

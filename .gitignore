@@ -1,0 +1,35 @@
+ 
+
+# VSCode
+
+.vscode/
+!.vscode/extensions.json
+
+# Build outputs
+
+build/
+
+# Temporary files
+
+*.log
+*.tmp
+
+# OS files
+
+.DS_Store
+Thumbs.db
+
+# Python cache
+
+**pycache**/
+*.pyc
+
+# Local environment files
+
+.env
+.env.*
+
+# Optional local SDK configs
+
+sdkconfig
+sdkconfig.old

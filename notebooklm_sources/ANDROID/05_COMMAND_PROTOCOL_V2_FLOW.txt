@@ -1,0 +1,1513 @@
+============================================================
+ANDROID 05 COMMAND PROTOCOL V2 FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: mesh/MeshCommandService.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshCommandService.kt
+SUMMARY: Work ekranından gelen komutların service katmanı.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import com.example.prolightmesh.mesh.protocol.TimeSyncService
+
+class MeshCommandService(
+    private val meshController: MeshController,
+    private val meshCommander: MeshCommander,
+    private val timeSyncService: TimeSyncService,
+    private val onStatus: (String) -> Unit
+) {
+    private val handler = Handler(Looper.getMainLooper())
+
+    fun sendPower(groupAddress: Int, turnOn: Boolean) {
+        if (!isProxyReady()) return
+
+        val value = if (turnOn) 1023 else 0
+        onStatus(if (turnOn) "Işık açılıyor..." else "Işık kapatılıyor...")
+
+        sendGroupDim(groupAddress, value)
+    }
+
+    fun sendRgb(groupAddress: Int, r: Int, g: Int, b: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("RGB GROUP gönderiliyor -> group=0x${groupAddress.toString(16)} R:$r G:$g B:$b")
+
+        meshCommander.sendGroupCommand(groupAddress, 'R', r)
+
+        handler.postDelayed({
+            if (isProxyReady()) {
+                meshCommander.sendGroupCommand(groupAddress, 'G', g)
+            }
+        }, 500L)
+
+        handler.postDelayed({
+            if (isProxyReady()) {
+                meshCommander.sendGroupCommand(groupAddress, 'B', b)
+            }
+        }, 1000L)
+
+        handler.postDelayed({
+            if (isProxyReady()) {
+                meshCommander.sendGroupCommand(groupAddress, 'M', 1023)
+            }
+        }, 1500L)
+    }
+
+    fun sendGroupDim(groupAddress: Int, dimValue: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("GROUP dim gönderiliyor -> group=0x${groupAddress.toString(16)} value=$dimValue")
+        meshCommander.sendGroupCommand(groupAddress, 'M', dimValue)
+    }
+
+    fun sendGroupEffect(groupAddress: Int, effectValue: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("GROUP legacy effect gönderiliyor -> group=0x${groupAddress.toString(16)} effect=$effectValue")
+        meshCommander.sendGroupCommand(groupAddress, 'E', effectValue)
+    }
+
+    fun sendScheduledGroupEffect(groupAddress: Int, effectValue: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("Scheduled effect hazırlanıyor -> group=0x${groupAddress.toString(16)} effect=$effectValue")
+
+        timeSyncService.ensureFreshSync(
+            maxAgeMs = 10_000L,
+            onReady = {
+                if (!isProxyReady()) return@ensureFreshSync
+
+                onStatus("V2 scheduled effect gönderiliyor -> group=0x${groupAddress.toString(16)} effect=$effectValue")
+
+                meshCommander.sendScheduledGroupEffect(
+                    groupAddress = groupAddress,
+                    effectValue = effectValue,
+                    delayMs = 2_000L,
+                    speed = 0,
+                    intensity = 0
+                )
+            }
+        )
+    }
+
+    fun sendGroupFanMode(groupAddress: Int, fanMode: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("GROUP fan mode gönderiliyor -> group=0x${groupAddress.toString(16)} fan=$fanMode")
+        meshCommander.sendGroupCommand(groupAddress, 'F', fanMode)
+    }
+
+    fun sendPing(nodeAddress: Int) {
+        if (!isProxyReady()) return
+
+        meshCommander.sendPing(nodeAddress)
+    }
+
+    fun sendTimeSync(nodeAddress: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("TIME_SYNC gönderiliyor -> node=0x${nodeAddress.toString(16)}")
+        meshCommander.sendTimeSync(nodeAddress)
+    }
+
+    fun syncAllKnownNodes() {
+        if (!isProxyReady()) return
+
+        timeSyncService.syncAllKnownNodes()
+    }
+
+    fun requestNodeHealth(nodeAddress: Int, requestType: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("Health request gönderiliyor -> node=0x${nodeAddress.toString(16)} request=$requestType")
+        meshCommander.sendHealthRequest(nodeAddress, requestType)
+    }
+
+    fun requestBasicTelemetry(nodeAddress: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("Telemetry okunuyor -> node=0x${nodeAddress.toString(16)}")
+
+        meshCommander.sendHealthRequest(nodeAddress, MeshCommander.HEALTH_TEMPERATURE_X10)
+
+        handler.postDelayed({
+            if (isProxyReady()) {
+                meshCommander.sendHealthRequest(nodeAddress, MeshCommander.HEALTH_FAN_MODE)
+            }
+        }, 250L)
+
+        handler.postDelayed({
+            if (isProxyReady()) {
+                meshCommander.sendHealthRequest(nodeAddress, MeshCommander.HEALTH_FAN_SPEED_PERCENT)
+            }
+        }, 500L)
+
+        handler.postDelayed({
+            if (isProxyReady()) {
+                meshCommander.sendHealthRequest(nodeAddress, MeshCommander.HEALTH_THERMAL_STATUS)
+            }
+        }, 750L)
+    }
+
+    fun testSingleNode(nodeAddress: Int) {
+        if (!isProxyReady()) return
+
+        onStatus("🧪 TEST → node=0x${nodeAddress.toString(16)}")
+
+        meshCommander.sendNodeCommandUnacked(nodeAddress, 'R', 1023)
+
+        handler.postDelayed({
+            meshCommander.sendNodeCommandUnacked(nodeAddress, 'G', 0)
+        }, 200)
+
+        handler.postDelayed({
+            meshCommander.sendNodeCommandUnacked(nodeAddress, 'B', 0)
+        }, 400)
+
+        handler.postDelayed({
+            meshCommander.sendNodeCommandUnacked(nodeAddress, 'M', 1023)
+        }, 600)
+    }
+
+    private fun isProxyReady(): Boolean {
+        if (!meshController.isProxyReady()) {
+            val err = "❌ Proxy bağlantısı yok. Önce proxy bağlantısı kurulmalı."
+            Log.e(TAG, err)
+            onStatus(err)
+            return false
+        }
+
+        return true
+    }
+
+    companion object {
+        private const val TAG = "MESH_COMMAND_SERVICE"
+    }
+}
+
+############################################################
+END FILE: mesh/MeshCommandService.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshCommander.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshCommander.kt
+SUMMARY: Vendor model unicast/group komut gönderimi.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.util.Log
+import com.example.prolightmesh.mesh.protocol.ProLightCommandIds
+import com.example.prolightmesh.mesh.protocol.ProLightCueManager
+import com.example.prolightmesh.mesh.protocol.ProLightV2PacketBuilder
+import no.nordicsemi.android.mesh.transport.VendorModelMessageAcked
+import no.nordicsemi.android.mesh.transport.VendorModelMessageUnacked
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+class MeshCommander(private val meshController: MeshController) {
+
+    companion object {
+        private const val TAG = "MESH_COMMANDER"
+
+        private const val COMPANY_ID = 0x02E5
+        private const val VENDOR_MODEL_ID = 0x0001
+        private const val OPCODE_SEND = 0x00
+
+        private const val GROUP_ADDRESS_START = 0xC000
+        private const val GROUP_ADDRESS_END = 0xFEFF
+
+        const val EFFECT_NONE = 0
+        const val EFFECT_POLICE = 1
+        const val EFFECT_AMBULANCE = 2
+        const val EFFECT_FIRE = 3
+        const val EFFECT_LIGHTNING = 4
+
+        const val FAN_SILENT = 0
+        const val FAN_LOW = 1
+        const val FAN_MEDIUM = 2
+        const val FAN_HIGH = 3
+        const val FAN_AUTO = 4
+
+        const val HEALTH_TEMPERATURE_X10 = 1
+        const val HEALTH_FAN_MODE = 2
+        const val HEALTH_FAN_SPEED_PERCENT = 3
+        const val HEALTH_THERMAL_STATUS = 4
+        const val HEALTH_DROPPED_COUNT = 5
+        const val HEALTH_ACCEPTED_COUNT = 6
+    }
+
+    fun sendProLightCommand(dstAddress: Int, commandType: Char, value: Int) {
+        if (isGroupAddress(dstAddress)) {
+            sendGroupCommand(dstAddress, commandType, value)
+        } else {
+            sendNodeCommandAcked(dstAddress, commandType, value)
+        }
+    }
+
+    fun sendPing(nodeAddress: Int) {
+        sendNodeCommandUnacked(nodeAddress, 'P', 0)
+    }
+
+    fun sendEffect(dstAddress: Int, effectValue: Int) {
+        sendProLightCommand(dstAddress, 'E', effectValue)
+    }
+
+    fun sendFanMode(dstAddress: Int, fanMode: Int) {
+        sendProLightCommand(dstAddress, 'F', fanMode)
+    }
+
+    fun sendHealthRequest(nodeAddress: Int, requestType: Int) {
+        sendNodeCommandUnacked(nodeAddress, 'H', requestType)
+    }
+
+    fun sendTimeSync(nodeAddress: Int) {
+        val phoneNow32 = ProLightV2PacketBuilder.phoneNow32()
+
+        val payload = ProLightV2PacketBuilder.buildV2Packet(
+            commandId = ProLightCommandIds.TIME_SYNC,
+            value = 0,
+            startAtMs = phoneNow32,
+            cueId = 0,
+            param1 = 0,
+            param2 = 0
+        )
+
+        Log.w(
+            "TIME_SYNC",
+            "TX -> node=0x${nodeAddress.toString(16)} phoneNow32=$phoneNow32"
+        )
+
+        sendNodePayloadUnacked(nodeAddress, payload)
+    }
+
+    fun sendScheduledGroupEffect(
+        groupAddress: Int,
+        effectValue: Int,
+        delayMs: Long = 500L,
+        speed: Int = 0,
+        intensity: Int = 0
+    ) {
+        val now32 = ProLightV2PacketBuilder.phoneNow32()
+        val startAt32 = (now32 + delayMs) and 0xFFFFFFFFL
+        val cueId = ProLightCueManager.next()
+
+        val payload = ProLightV2PacketBuilder.buildV2Packet(
+            commandId = ProLightCommandIds.EFFECT,
+            value = effectValue,
+            startAtMs = startAt32,
+            cueId = cueId,
+            param1 = speed,
+            param2 = intensity
+        )
+
+        Log.w(
+            "V2_SCHEDULE",
+            "GROUP EFFECT TX -> group=0x${groupAddress.toString(16)} effect=$effectValue startAt32=$startAt32 cueId=$cueId speed=$speed intensity=$intensity"
+        )
+
+        sendGroupPayloadUnacked(groupAddress, payload)
+    }
+
+    fun sendNodeCommandUnacked(dstAddress: Int, commandType: Char, value: Int) {
+        val payload = buildLegacyPayload(commandType, value)
+
+        Log.d(
+            TAG,
+            "📨 Vendor UNACKED NODE TX -> dst=0x${dstAddress.toString(16)}, type=$commandType, value=$value"
+        )
+
+        sendNodePayloadUnacked(dstAddress, payload)
+    }
+
+    fun sendNodeCommandAcked(dstAddress: Int, commandType: Char, value: Int) {
+        val network = meshController.meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "HATA: Mesh network yok")
+            return
+        }
+
+        val appKey = network.appKeys.firstOrNull() ?: run {
+            Log.e(TAG, "HATA: AppKey yok")
+            return
+        }
+
+        val payload = buildLegacyPayload(commandType, value)
+
+        Log.d(
+            TAG,
+            "🚀 Vendor ACKED NODE TX -> dst=0x${dstAddress.toString(16)}, type=$commandType, value=$value"
+        )
+
+        val message = VendorModelMessageAcked(
+            appKey,
+            VENDOR_MODEL_ID,
+            COMPANY_ID,
+            OPCODE_SEND,
+            payload
+        )
+
+        meshController.sendMeshMessage(dstAddress, message)
+    }
+
+    fun sendGroupCommand(dstAddress: Int, commandType: Char, value: Int) {
+        val payload = buildLegacyPayload(commandType, value)
+
+        Log.d(
+            TAG,
+            "📡 Vendor UNACKED GROUP TX -> dst=0x${dstAddress.toString(16)}, type=$commandType, value=$value"
+        )
+
+        sendGroupPayloadUnacked(dstAddress, payload)
+    }
+
+    private fun sendNodePayloadUnacked(dstAddress: Int, payload: ByteArray) {
+        val network = meshController.meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "HATA: Mesh network yok")
+            return
+        }
+
+        val appKey = network.appKeys.firstOrNull() ?: run {
+            Log.e(TAG, "HATA: AppKey yok")
+            return
+        }
+
+        val message = VendorModelMessageUnacked(
+            appKey,
+            VENDOR_MODEL_ID,
+            COMPANY_ID,
+            OPCODE_SEND,
+            payload
+        )
+
+        meshController.sendMeshMessage(dstAddress, message)
+    }
+
+    private fun sendGroupPayloadUnacked(dstAddress: Int, payload: ByteArray) {
+        val network = meshController.meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "HATA: Mesh network yok")
+            return
+        }
+
+        val appKey = network.appKeys.firstOrNull() ?: run {
+            Log.e(TAG, "HATA: AppKey yok")
+            return
+        }
+
+        val message = VendorModelMessageUnacked(
+            appKey,
+            VENDOR_MODEL_ID,
+            COMPANY_ID,
+            OPCODE_SEND,
+            payload
+        )
+
+        meshController.sendMeshMessage(dstAddress, message)
+    }
+
+    private fun buildLegacyPayload(commandType: Char, value: Int): ByteArray {
+        return ByteBuffer.allocate(3)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put(commandType.code.toByte())
+            .putShort(value.toShort())
+            .array()
+    }
+
+    private fun isGroupAddress(address: Int): Boolean {
+        return address in GROUP_ADDRESS_START..GROUP_ADDRESS_END
+    }
+}
+
+############################################################
+END FILE: mesh/MeshCommander.kt
+############################################################
+
+
+############################################################
+FILE: mesh/protocol/ProLightCommandIds.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/protocol/ProLightCommandIds.kt
+SUMMARY: V2 command id sabitleri.
+############################################################
+
+package com.example.prolightmesh.mesh.protocol
+
+object ProLightCommandIds {
+    const val RED = 1
+    const val GREEN = 2
+    const val BLUE = 3
+    const val MASTER = 4
+    const val EFFECT = 5
+    const val FAN = 6
+    const val PING = 7
+    const val HEALTH = 8
+    const val TIME_SYNC = 9
+}
+
+############################################################
+END FILE: mesh/protocol/ProLightCommandIds.kt
+############################################################
+
+
+############################################################
+FILE: mesh/protocol/ProLightV2PacketBuilder.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/protocol/ProLightV2PacketBuilder.kt
+SUMMARY: 12 byte V2 packet builder.
+############################################################
+
+package com.example.prolightmesh.mesh.protocol
+
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
+
+object ProLightV2PacketBuilder {
+
+    private const val VERSION_V2 = 2
+    private const val PACKET_SIZE = 12
+
+    fun buildV2Packet(
+        commandId: Int,
+        value: Int,
+        startAtMs: Long,
+        cueId: Int,
+        param1: Int = 0,
+        param2: Int = 0
+    ): ByteArray {
+        return ByteBuffer.allocate(PACKET_SIZE)
+            .order(ByteOrder.LITTLE_ENDIAN)
+            .put(VERSION_V2.toByte())
+            .put(commandId.toByte())
+            .putShort((value and 0xFFFF).toShort())
+            .putInt((startAtMs and 0xFFFFFFFFL).toInt())
+            .putShort((cueId and 0xFFFF).toShort())
+            .put((param1 and 0xFF).toByte())
+            .put((param2 and 0xFF).toByte())
+            .array()
+    }
+
+    fun phoneNow32(): Long {
+        return System.currentTimeMillis() and 0xFFFFFFFFL
+    }
+}
+
+############################################################
+END FILE: mesh/protocol/ProLightV2PacketBuilder.kt
+############################################################
+
+
+############################################################
+FILE: mesh/protocol/ProLightCueManager.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/protocol/ProLightCueManager.kt
+SUMMARY: Cue ID / scheduled command yönetimi.
+############################################################
+
+package com.example.prolightmesh.mesh.protocol
+
+object ProLightCueManager {
+
+    private var nextCueId: Int = 1
+
+    @Synchronized
+    fun next(): Int {
+        val id = nextCueId
+
+        nextCueId++
+
+        if (nextCueId > 65000) {
+            nextCueId = 1
+        }
+
+        return id
+    }
+}
+
+############################################################
+END FILE: mesh/protocol/ProLightCueManager.kt
+############################################################
+
+
+############################################################
+FILE: mesh/protocol/TimeSyncService.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/protocol/TimeSyncService.kt
+SUMMARY: Android tarafı TIME_SYNC yönetimi.
+############################################################
+
+package com.example.prolightmesh.mesh.protocol
+
+import android.os.Handler
+import android.os.SystemClock
+import android.util.Log
+import com.example.prolightmesh.mesh.MeshCommander
+import com.example.prolightmesh.mesh.MeshController
+
+class TimeSyncService(
+    private val meshController: MeshController,
+    private val meshCommander: MeshCommander,
+    private val mainHandler: Handler,
+    private val onStatus: (String) -> Unit
+) {
+    private var lastSyncStartedAtMs: Long = 0L
+    private var lastSyncFinishedAtMs: Long = 0L
+
+    fun ensureFreshSync(
+        maxAgeMs: Long = DEFAULT_MAX_SYNC_AGE_MS,
+        onReady: () -> Unit
+    ) {
+        val age = getLastSyncAgeMs()
+
+        if (lastSyncFinishedAtMs > 0L && age <= maxAgeMs) {
+            Log.w(TAG, "Sync fresh. ageMs=$age")
+            onReady()
+            return
+        }
+
+        Log.w(TAG, "Sync old/missing. ageMs=$age -> syncing all nodes")
+
+        syncAllKnownNodes(
+            onComplete = {
+                Log.w(TAG, "Sync complete. Running scheduled action.")
+                onReady()
+            }
+        )
+    }
+
+    fun syncAllKnownNodes(onComplete: (() -> Unit)? = null) {
+        if (!meshController.isProxyReady()) {
+            val msg = "TIME_SYNC yapılamadı: Proxy hazır değil."
+            Log.e(TAG, msg)
+            onStatus(msg)
+            return
+        }
+
+        val network = meshController.meshManagerApi.meshNetwork ?: run {
+            val msg = "TIME_SYNC yapılamadı: Mesh network yok."
+            Log.e(TAG, msg)
+            onStatus(msg)
+            return
+        }
+
+        val provisionerAddress = network.provisionerAddress
+
+        val nodes = network.nodes
+            .filter { it.unicastAddress != provisionerAddress }
+
+        if (nodes.isEmpty()) {
+            val msg = "TIME_SYNC: sync edilecek node yok."
+            Log.w(TAG, msg)
+            onStatus(msg)
+            onComplete?.invoke()
+            return
+        }
+
+        lastSyncStartedAtMs = SystemClock.elapsedRealtime()
+
+        onStatus("TIME_SYNC başlıyor -> node count=${nodes.size}")
+
+        var delay = 0L
+
+        nodes.forEachIndexed { index, node ->
+            mainHandler.postDelayed({
+                if (!meshController.isProxyReady()) {
+                    Log.e(
+                        TAG,
+                        "TIME_SYNC skip: proxy hazır değil. node=0x${node.unicastAddress.toString(16)}"
+                    )
+                    return@postDelayed
+                }
+
+                Log.w(
+                    TAG,
+                    "TIME_SYNC node ${index + 1}/${nodes.size} -> 0x${node.unicastAddress.toString(16)}"
+                )
+
+                meshCommander.sendTimeSync(node.unicastAddress)
+            }, delay)
+
+            delay += SYNC_NODE_GAP_MS
+        }
+
+        mainHandler.postDelayed({
+            lastSyncFinishedAtMs = SystemClock.elapsedRealtime()
+
+            val duration = lastSyncFinishedAtMs - lastSyncStartedAtMs
+
+            Log.w(TAG, "TIME_SYNC finished. durationMs=$duration")
+            onStatus("TIME_SYNC tamamlandı. duration=${duration}ms")
+
+            onComplete?.invoke()
+        }, delay + SYNC_SETTLE_MS)
+    }
+
+    fun getLastSyncAgeMs(): Long {
+        if (lastSyncFinishedAtMs == 0L) {
+            return Long.MAX_VALUE
+        }
+
+        return SystemClock.elapsedRealtime() - lastSyncFinishedAtMs
+    }
+
+    fun markSyncInvalid(reason: String) {
+        Log.w(TAG, "Sync invalidated. reason=$reason")
+        lastSyncFinishedAtMs = 0L
+    }
+
+    companion object {
+        private const val TAG = "TIME_SYNC_SERVICE"
+
+        private const val DEFAULT_MAX_SYNC_AGE_MS = 10_000L
+        private const val SYNC_NODE_GAP_MS = 250L
+        private const val SYNC_SETTLE_MS = 300L
+    }
+}
+
+############################################################
+END FILE: mesh/protocol/TimeSyncService.kt
+############################################################
+
+
+############################################################
+FILE: ui/screens/WorkScreen.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/screens/WorkScreen.kt
+SUMMARY: Work ana ekranı.
+############################################################
+
+package com.example.prolightmesh.ui.screens
+
+import android.app.Activity
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.example.prolightmesh.storage.StoredGroup
+import com.example.prolightmesh.ui.components.GroupFolderCard
+import com.example.prolightmesh.ui.components.ProSlider
+import com.example.prolightmesh.ui.theme.ProColors
+import com.example.prolightmesh.ui.work.WorkGroupControlDialog
+
+class WorkScreen(
+    private val activity: Activity,
+    private val onGlobalDimChanged: (Int) -> Unit,
+    private val onGroupColorChanged: (Int, Int, Int, Int) -> Unit,
+    private val onGroupDimChanged: (Int, Int) -> Unit,
+    private val onGroupEffectChanged: (Int, Int) -> Unit,
+    private val onGroupFanModeChanged: (Int, Int) -> Unit
+) {
+    val rootView: ScrollView
+    private val container: LinearLayout
+    private val statusText: TextView
+    private val groupsContainer: LinearLayout
+
+    init {
+        container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 64, 40, 40)
+            setBackgroundColor(ProColors.Background)
+        }
+
+        val title = TextView(activity).apply {
+            text = "SAHNE KONTROLÜ"
+            textSize = 24f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextPrimary)
+            gravity = Gravity.CENTER
+        }
+
+        statusText = TextView(activity).apply {
+            text = "Sistem Hazır"
+            textSize = 14f
+            setTextColor(ProColors.Success)
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 48)
+        }
+
+        val globalSlider = ProSlider(
+            context = activity,
+            title = "GLOBAL MASTER DIMMER",
+            maxValue = 1023,
+            initialValue = 0,
+            onValueChanged = { dimValue -> onGlobalDimChanged(dimValue) }
+        )
+
+        val separator = android.view.View(activity).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                2
+            ).apply {
+                setMargins(0, 32, 0, 32)
+            }
+            setBackgroundColor(ProColors.SurfaceLight)
+        }
+
+        val groupsTitle = TextView(activity).apply {
+            text = "GRUPLAR"
+            textSize = 16f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 0, 0, 24)
+        }
+
+        groupsContainer = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        container.addView(title)
+        container.addView(statusText)
+        container.addView(globalSlider)
+        container.addView(separator)
+        container.addView(groupsTitle)
+        container.addView(groupsContainer)
+
+        rootView = ScrollView(activity).apply {
+            isFillViewport = true
+            setBackgroundColor(ProColors.Background)
+            addView(container)
+        }
+    }
+
+    fun setStatus(text: String) {
+        statusText.text = text
+    }
+
+    fun renderGroups(groups: List<StoredGroup>) {
+        groupsContainer.removeAllViews()
+
+        groups.forEach { group ->
+            val folderCard = GroupFolderCard(
+                context = activity,
+                groupName = group.name,
+                addressHex = "0x${group.address.toString(16)}",
+                onClick = { showGroupControlPanel(group) }
+            )
+            groupsContainer.addView(folderCard)
+        }
+    }
+
+    private fun showGroupControlPanel(group: StoredGroup) {
+        WorkGroupControlDialog(
+            activity = activity,
+            group = group,
+            onStatus = { message -> setStatus(message) },
+            onGroupColorChanged = onGroupColorChanged,
+            onGroupDimChanged = onGroupDimChanged,
+            onGroupEffectChanged = onGroupEffectChanged,
+            onGroupFanModeChanged = onGroupFanModeChanged
+        ).show()
+    }
+}
+
+############################################################
+END FILE: ui/screens/WorkScreen.kt
+############################################################
+
+
+############################################################
+FILE: ui/work/WorkEffectTabView.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/work/WorkEffectTabView.kt
+SUMMARY: Effect komutları UI.
+############################################################
+
+package com.example.prolightmesh.ui.work
+
+import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.example.prolightmesh.storage.StoredGroup
+import com.example.prolightmesh.ui.theme.ProColors
+
+object WorkEffectTabView {
+
+    fun create(
+        context: Context,
+        group: StoredGroup,
+        onStatus: (String) -> Unit,
+        onGroupEffectChanged: (Int, Int) -> Unit
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+
+            addView(sectionTitle(context, "EFFECT ENGINE"))
+
+            addView(effectButton(context, "OFF", "Effect kapalı", Color.parseColor("#7F8C8D")) {
+                onStatus("${group.name} effect -> none")
+                onGroupEffectChanged(group.address, 0)
+            })
+
+            addView(effectButton(context, "POLICE", "Kırmızı / mavi emergency pattern", Color.parseColor("#2F80ED")) {
+                onStatus("${group.name} effect -> police")
+                onGroupEffectChanged(group.address, 1)
+            })
+
+            addView(effectButton(context, "AMBULANCE", "Uyarı pattern", Color.parseColor("#EB5757")) {
+                onStatus("${group.name} effect -> ambulance")
+                onGroupEffectChanged(group.address, 2)
+            })
+
+            addView(effectButton(context, "FIRE", "Alev efekti", Color.parseColor("#F2994A")) {
+                onStatus("${group.name} effect -> fire")
+                onGroupEffectChanged(group.address, 3)
+            })
+
+            addView(effectButton(context, "LIGHTNING", "Şimşek flash efekti", Color.parseColor("#F2F2F2")) {
+                onStatus("${group.name} effect -> lightning")
+                onGroupEffectChanged(group.address, 4)
+            })
+        }
+    }
+
+    private fun sectionTitle(context: Context, textValue: String): TextView {
+        return TextView(context).apply {
+            text = textValue
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 0, 0, dp(context, 14))
+        }
+    }
+
+    private fun effectButton(
+        context: Context,
+        title: String,
+        subtitle: String,
+        accentColor: Int,
+        action: () -> Unit
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 16))
+            background = roundedBackground(ProColors.SurfaceLight, dp(context, 18))
+
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, dp(context, 12))
+            }
+
+            addView(TextView(context).apply {
+                text = "FX"
+                textSize = 12f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                background = roundedBackground(accentColor, dp(context, 14))
+                layoutParams = LinearLayout.LayoutParams(
+                    dp(context, 44),
+                    dp(context, 44)
+                )
+            })
+
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(context, 14), 0, 0, 0)
+
+                addView(TextView(context).apply {
+                    text = title
+                    textSize = 15f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(ProColors.TextPrimary)
+                })
+
+                addView(TextView(context).apply {
+                    text = subtitle
+                    textSize = 12f
+                    setTextColor(ProColors.TextSecondary)
+                })
+            })
+
+            setOnClickListener { action() }
+            WorkPressEffect.apply(this)
+        }
+    }
+
+    private fun roundedBackground(color: Int, radius: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radius.toFloat()
+        }
+    }
+
+    private fun dp(context: Context, value: Int): Int {
+        return (value * context.resources.displayMetrics.density).toInt()
+    }
+}
+
+############################################################
+END FILE: ui/work/WorkEffectTabView.kt
+############################################################
+
+
+############################################################
+FILE: ui/work/WorkColorTabView.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/work/WorkColorTabView.kt
+SUMMARY: Color komutları UI.
+############################################################
+
+package com.example.prolightmesh.ui.work
+
+import android.content.Context
+import android.graphics.Typeface
+import android.view.Gravity
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.example.prolightmesh.storage.StoredGroup
+import com.example.prolightmesh.ui.components.ColorWheelPanel
+import com.example.prolightmesh.ui.theme.ProColors
+
+object WorkColorTabView {
+
+    fun create(
+        context: Context,
+        group: StoredGroup,
+        onStatus: (String) -> Unit,
+        onGroupColorChanged: (Int, Int, Int, Int) -> Unit
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+
+            addView(TextView(context).apply {
+                text = "RENK PALETİ"
+                textSize = 13f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(ProColors.TextSecondary)
+                setPadding(0, 0, 0, dp(context, 12))
+            })
+
+            addView(TextView(context).apply {
+                text = "Rengi seçmek için çember üzerinde dokunup bırak."
+                textSize = 12f
+                setTextColor(ProColors.TextSecondary)
+                gravity = Gravity.CENTER
+                setPadding(0, 0, 0, dp(context, 20))
+            })
+
+            addView(ColorWheelPanel(context) { r, g, b ->
+                onStatus("${group.name} renk -> R:$r G:$g B:$b")
+                onGroupColorChanged(group.address, r, g, b)
+            }.apply {
+                layoutParams = LinearLayout.LayoutParams(
+                    dp(context, 300),
+                    dp(context, 300)
+                ).apply {
+                    setMargins(0, 0, 0, dp(context, 20))
+                }
+            })
+        }
+    }
+
+    private fun dp(context: Context, value: Int): Int {
+        return (value * context.resources.displayMetrics.density).toInt()
+    }
+}
+
+############################################################
+END FILE: ui/work/WorkColorTabView.kt
+############################################################
+
+
+############################################################
+FILE: ui/work/WorkLightTabView.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/work/WorkLightTabView.kt
+SUMMARY: Light control UI.
+############################################################
+
+package com.example.prolightmesh.ui.work
+
+import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.example.prolightmesh.storage.StoredGroup
+import com.example.prolightmesh.ui.components.ProSlider
+import com.example.prolightmesh.ui.theme.ProColors
+
+object WorkLightTabView {
+
+    fun create(
+        context: Context,
+        group: StoredGroup,
+        onStatus: (String) -> Unit,
+        onGroupColorChanged: (Int, Int, Int, Int) -> Unit,
+        onGroupDimChanged: (Int, Int) -> Unit
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+
+            addView(sectionTitle(context, "HIZLI IŞIK KONTROLÜ"))
+
+            addView(colorButton(context, "KIRMIZI", "Red target", Color.parseColor("#D93636")) {
+                onStatus("${group.name} -> kırmızı")
+                onGroupColorChanged(group.address, 1023, 0, 0)
+            })
+
+            addView(colorButton(context, "YEŞİL", "Green target", Color.parseColor("#27AE60")) {
+                onStatus("${group.name} -> yeşil")
+                onGroupColorChanged(group.address, 0, 1023, 0)
+            })
+
+            addView(colorButton(context, "MAVİ", "Blue target", Color.parseColor("#2F80ED")) {
+                onStatus("${group.name} -> mavi")
+                onGroupColorChanged(group.address, 0, 0, 1023)
+            })
+
+            addView(colorButton(context, "BEYAZ", "Full RGB white", Color.parseColor("#F2F2F2")) {
+                onStatus("${group.name} -> beyaz")
+                onGroupColorChanged(group.address, 1023, 1023, 1023)
+            })
+
+            addView(colorButton(context, "KAPALI", "RGB zero", Color.parseColor("#1F1F1F")) {
+                onStatus("${group.name} -> kapalı")
+                onGroupColorChanged(group.address, 0, 0, 0)
+            })
+
+            addView(spacer(context, 18))
+
+            addView(
+                ProSlider(
+                    context = context,
+                    title = "GRUP PARLAKLIĞI",
+                    maxValue = 1023,
+                    initialValue = 0,
+                    onValueChanged = { dimValue ->
+                        onStatus("${group.name} parlaklık -> $dimValue")
+                        onGroupDimChanged(group.address, dimValue)
+                    }
+                )
+            )
+        }
+    }
+
+    private fun sectionTitle(context: Context, textValue: String): TextView {
+        return TextView(context).apply {
+            text = textValue
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 0, 0, dp(context, 14))
+        }
+    }
+
+    private fun colorButton(
+        context: Context,
+        title: String,
+        subtitle: String,
+        accentColor: Int,
+        action: () -> Unit
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(context, 16), dp(context, 14), dp(context, 16), dp(context, 14))
+            background = roundedBackground(ProColors.SurfaceLight, dp(context, 18))
+
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, dp(context, 12))
+            }
+
+            addView(TextView(context).apply {
+                text = "●"
+                textSize = 24f
+                setTextColor(accentColor)
+                gravity = Gravity.CENTER
+            })
+
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(context, 14), 0, 0, 0)
+
+                addView(TextView(context).apply {
+                    text = title
+                    textSize = 15f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(ProColors.TextPrimary)
+                })
+
+                addView(TextView(context).apply {
+                    text = subtitle
+                    textSize = 12f
+                    setTextColor(ProColors.TextSecondary)
+                })
+            })
+
+            setOnClickListener { action() }
+            WorkPressEffect.apply(this)
+        }
+    }
+
+    private fun spacer(context: Context, height: Int): TextView {
+        return TextView(context).apply {
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(context, height)
+            )
+        }
+    }
+
+    private fun roundedBackground(color: Int, radius: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radius.toFloat()
+        }
+    }
+
+    private fun dp(context: Context, value: Int): Int {
+        return (value * context.resources.displayMetrics.density).toInt()
+    }
+}
+
+############################################################
+END FILE: ui/work/WorkLightTabView.kt
+############################################################
+
+
+############################################################
+FILE: ui/work/WorkFanTabView.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/work/WorkFanTabView.kt
+SUMMARY: Fan control UI.
+############################################################
+
+package com.example.prolightmesh.ui.work
+
+import android.content.Context
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.TextView
+import com.example.prolightmesh.storage.StoredGroup
+import com.example.prolightmesh.ui.theme.ProColors
+
+object WorkFanTabView {
+
+    fun create(
+        context: Context,
+        group: StoredGroup,
+        onStatus: (String) -> Unit,
+        onGroupFanModeChanged: (Int, Int) -> Unit
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.VERTICAL
+
+            addView(sectionTitle(context, "FAN CONTROL"))
+
+            addView(fanButton(context, "SILENT", "Sessiz mod", 0, Color.parseColor("#56CCF2")) {
+                onStatus("${group.name} fan -> silent")
+                onGroupFanModeChanged(group.address, 0)
+            })
+
+            addView(fanButton(context, "LOW", "Düşük fan seviyesi", 1, Color.parseColor("#6FCF97")) {
+                onStatus("${group.name} fan -> low")
+                onGroupFanModeChanged(group.address, 1)
+            })
+
+            addView(fanButton(context, "MEDIUM", "Orta fan seviyesi", 2, Color.parseColor("#F2C94C")) {
+                onStatus("${group.name} fan -> medium")
+                onGroupFanModeChanged(group.address, 2)
+            })
+
+            addView(fanButton(context, "HIGH", "Yüksek fan seviyesi", 3, Color.parseColor("#F2994A")) {
+                onStatus("${group.name} fan -> high")
+                onGroupFanModeChanged(group.address, 3)
+            })
+
+            addView(fanButton(context, "AUTO", "Sıcaklığa göre otomatik", 4, Color.parseColor("#2F80ED")) {
+                onStatus("${group.name} fan -> auto")
+                onGroupFanModeChanged(group.address, 4)
+            })
+        }
+    }
+
+    private fun sectionTitle(context: Context, textValue: String): TextView {
+        return TextView(context).apply {
+            text = textValue
+            textSize = 13f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextSecondary)
+            setPadding(0, 0, 0, dp(context, 14))
+        }
+    }
+
+    private fun fanButton(
+        context: Context,
+        title: String,
+        subtitle: String,
+        level: Int,
+        accentColor: Int,
+        action: () -> Unit
+    ): LinearLayout {
+        return LinearLayout(context).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(context, 16), dp(context, 16), dp(context, 16), dp(context, 16))
+            background = roundedBackground(ProColors.SurfaceLight, dp(context, 18))
+
+            layoutParams = LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ).apply {
+                setMargins(0, 0, 0, dp(context, 12))
+            }
+
+            addView(TextView(context).apply {
+                text = level.toString()
+                textSize = 16f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(Color.WHITE)
+                gravity = Gravity.CENTER
+                background = roundedBackground(accentColor, dp(context, 14))
+                layoutParams = LinearLayout.LayoutParams(
+                    dp(context, 44),
+                    dp(context, 44)
+                )
+            })
+
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setPadding(dp(context, 14), 0, 0, 0)
+
+                addView(TextView(context).apply {
+                    text = title
+                    textSize = 15f
+                    setTypeface(null, Typeface.BOLD)
+                    setTextColor(ProColors.TextPrimary)
+                })
+
+                addView(TextView(context).apply {
+                    text = subtitle
+                    textSize = 12f
+                    setTextColor(ProColors.TextSecondary)
+                })
+            })
+
+            setOnClickListener { action() }
+            WorkPressEffect.apply(this)
+        }
+    }
+
+    private fun roundedBackground(color: Int, radius: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radius.toFloat()
+        }
+    }
+
+    private fun dp(context: Context, value: Int): Int {
+        return (value * context.resources.displayMetrics.density).toInt()
+    }
+}
+
+############################################################
+END FILE: ui/work/WorkFanTabView.kt
+############################################################
+
+
+############################################################
+FILE: ui/work/WorkGroupControlDialog.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/work/WorkGroupControlDialog.kt
+SUMMARY: Group control dialog.
+############################################################
+
+package com.example.prolightmesh.ui.work
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.graphics.Color
+import android.graphics.Typeface
+import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.GradientDrawable
+import android.view.Gravity
+import android.view.ViewGroup
+import android.view.Window
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.example.prolightmesh.storage.StoredGroup
+import com.example.prolightmesh.ui.theme.ProColors
+
+class WorkGroupControlDialog(
+    private val activity: Activity,
+    private val group: StoredGroup,
+    private val onStatus: (String) -> Unit,
+    private val onGroupColorChanged: (Int, Int, Int, Int) -> Unit,
+    private val onGroupDimChanged: (Int, Int) -> Unit,
+    private val onGroupEffectChanged: (Int, Int) -> Unit,
+    private val onGroupFanModeChanged: (Int, Int) -> Unit
+) {
+    private lateinit var dialog: AlertDialog
+    private lateinit var contentContainer: LinearLayout
+    private lateinit var tabSelector: WorkTabSelector
+
+    fun show() {
+        val root = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(22), dp(20), dp(20))
+            background = roundedBackground(ProColors.Surface, dp(28))
+        }
+
+        root.addView(headerView())
+
+        tabSelector = WorkTabSelector(
+            context = activity,
+            tabs = listOf("IŞIKLAR", "RENK", "EFFECT", "FAN"),
+            onTabSelected = { index -> showTab(index) }
+        )
+
+        root.addView(tabSelector.rootView)
+
+        contentContainer = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dp(20), 0, 0)
+        }
+
+        val scrollView = ScrollView(activity).apply {
+            isFillViewport = false
+            addView(contentContainer)
+        }
+
+        root.addView(
+            scrollView,
+            LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                dp(560)
+            )
+        )
+
+        dialog = AlertDialog.Builder(activity)
+            .setView(root)
+            .create()
+
+        dialog.requestWindowFeature(Window.FEATURE_NO_TITLE)
+        dialog.window?.setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
+        dialog.show()
+
+        dialog.window?.setLayout(
+            (activity.resources.displayMetrics.widthPixels * 0.94f).toInt(),
+            ViewGroup.LayoutParams.WRAP_CONTENT
+        )
+
+        showTab(0)
+    }
+
+    private fun showTab(index: Int) {
+        contentContainer.removeAllViews()
+        tabSelector.setSelected(index)
+
+        val view = when (index) {
+            0 -> WorkLightTabView.create(
+                context = activity,
+                group = group,
+                onStatus = onStatus,
+                onGroupColorChanged = onGroupColorChanged,
+                onGroupDimChanged = onGroupDimChanged
+            )
+
+            1 -> WorkColorTabView.create(
+                context = activity,
+                group = group,
+                onStatus = onStatus,
+                onGroupColorChanged = onGroupColorChanged
+            )
+
+            2 -> WorkEffectTabView.create(
+                context = activity,
+                group = group,
+                onStatus = onStatus,
+                onGroupEffectChanged = onGroupEffectChanged
+            )
+
+            else -> WorkFanTabView.create(
+                context = activity,
+                group = group,
+                onStatus = onStatus,
+                onGroupFanModeChanged = onGroupFanModeChanged
+            )
+        }
+
+        contentContainer.addView(view)
+    }
+
+    private fun headerView(): LinearLayout {
+        return LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER_HORIZONTAL
+            setPadding(0, 0, 0, dp(18))
+
+            addView(TextView(activity).apply {
+                text = group.name
+                textSize = 22f
+                setTypeface(null, Typeface.BOLD)
+                setTextColor(ProColors.TextPrimary)
+                gravity = Gravity.CENTER
+            })
+
+            addView(TextView(activity).apply {
+                text = "0x${group.address.toString(16)} • Grup Kontrol Paneli"
+                textSize = 13f
+                setTextColor(ProColors.TextSecondary)
+                gravity = Gravity.CENTER
+                setPadding(0, dp(6), 0, 0)
+            })
+        }
+    }
+
+    private fun roundedBackground(color: Int, radius: Int): GradientDrawable {
+        return GradientDrawable().apply {
+            setColor(color)
+            cornerRadius = radius.toFloat()
+        }
+    }
+
+    private fun dp(value: Int): Int {
+        return (value * activity.resources.displayMetrics.density).toInt()
+    }
+}
+
+############################################################
+END FILE: ui/work/WorkGroupControlDialog.kt
+############################################################
+

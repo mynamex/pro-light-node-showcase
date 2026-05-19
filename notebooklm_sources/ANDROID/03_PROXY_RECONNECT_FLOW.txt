@@ -1,0 +1,1000 @@
+============================================================
+ANDROID 03 PROXY RECONNECT FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: mesh/MeshAutoReconnectService.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshAutoReconnectService.kt
+SUMMARY: Proxy discovery ve reconnect döngüsü.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.os.Handler
+import android.util.Log
+import com.example.prolightmesh.ble.MeshScanResult
+
+class MeshAutoReconnectService(
+    private val meshController: MeshController,
+    private val meshProvisioner: MeshProvisioner,
+    private val mainHandler: Handler,
+    private val onStatus: (String) -> Unit
+
+) {
+
+    private var autoReconnectStarted = false
+    private var proxyConnectInProgress = false
+
+    private val proxyCandidates = linkedMapOf<String, ProxyCandidate>()
+    private val proxyPolicy = ProxySelectionPolicy()
+
+    private var activeProxyMac: String? = null
+    private var avoidProxyMac: String? = null
+
+    private var reconnectAttemptCount = 0
+    private var nextReconnectAllowedAt = 0L
+    private var lastRotationAt = 0L
+
+    private var onProxyConnectedListener: (() -> Unit)? = null
+
+
+
+    fun setOnProxyConnectedListener(listener: () -> Unit) {
+        onProxyConnectedListener = listener
+    }
+
+    fun getActiveProxyMac(): String? {
+        return activeProxyMac
+    }
+
+
+    private var paused = false
+    private var pausedProxyIgnoreCount = 0
+
+    fun pause(reason: String) {
+        if (paused) return
+
+        paused = true
+        Log.w(TAG, "Auto reconnect pause edildi. reason=$reason")
+    }
+
+    fun resume(reason: String) {
+        if (!paused) return
+
+        paused = false
+        nextReconnectAllowedAt = 0L
+
+        Log.w(TAG, "Auto reconnect resume edildi. reason=$reason")
+    }
+
+    fun isPaused(): Boolean {
+        return paused
+    }
+
+    fun onProvisionedProxyFound(result: MeshScanResult) {
+        if (paused) {
+            pausedProxyIgnoreCount++
+
+            if (pausedProxyIgnoreCount == 1 || pausedProxyIgnoreCount % PAUSED_PROXY_IGNORE_LOG_EVERY == 0) {
+                Log.d(
+                    TAG,
+                    "Proxy adayları ignore ediliyor: auto reconnect paused count=$pausedProxyIgnoreCount"
+                )
+            }
+
+            return
+        }
+
+        pausedProxyIgnoreCount = 0
+
+        val now = System.currentTimeMillis()
+        val old = proxyCandidates[result.address]
+
+        if (old != null) {
+            val timeDiff = now - old.lastSeenAt
+            val rssiDiff = kotlin.math.abs(result.rssi - old.rssi)
+
+            if (timeDiff < 1500L && rssiDiff < 3) {
+                return
+            }
+        }
+
+        proxyCandidates[result.address] = if (old == null) {
+            ProxyCandidate(
+                scanResult = result,
+                macAddress = result.address,
+                name = result.name,
+                rssi = result.rssi,
+                firstSeenAt = now,
+                lastSeenAt = now
+            )
+        } else {
+            old.copy(
+                scanResult = result,
+                name = result.name,
+                rssi = if (kotlin.math.abs(result.rssi - old.rssi) >= 3) result.rssi else old.rssi,
+                lastSeenAt = now
+            )
+        }
+
+        Log.d(TAG, "Proxy adayı update: ${result.name} ${result.address} rssi=${result.rssi}")
+
+        if (meshController.isProxyReady()) return
+        if (proxyConnectInProgress) return
+        if (!canTryReconnect()) return
+
+        val selected = selectBestProxyCandidate() ?: return
+
+        proxyConnectInProgress = true
+        activeProxyMac = selected.macAddress
+
+        Log.w(TAG, "Proxy seçildi, bağlanılıyor: ${selected.name} ${selected.macAddress}")
+        onStatus("Proxy bağlantısı kuruluyor: ${selected.name}")
+
+        meshProvisioner.connectToProxy(selected.scanResult)
+    }
+    fun onProxyConnected() {
+        proxyConnectInProgress = false
+        reconnectAttemptCount = 0
+        nextReconnectAllowedAt = 0L
+        avoidProxyMac = null
+
+        val mac = activeProxyMac
+        if (mac != null) {
+            proxyCandidates[mac]?.let { candidate ->
+                proxyCandidates[mac] = candidate.copy(
+                    successCount = candidate.successCount + 1
+                )
+            }
+        }
+
+        Log.w(TAG, "Proxy bağlı. activeProxyMac=$activeProxyMac")
+
+        // Proxy bağlandıktan sonra filter setup ve GATT stabil olsun diye kısa bekletiyoruz.
+        mainHandler.postDelayed({
+            Log.w(TAG, "Proxy connected listener tetiklendi. Queue devam edebilir.")
+            onProxyConnectedListener?.invoke()
+        }, 1_200L)
+    }
+
+    fun onProxyDisconnected() {
+        proxyConnectInProgress = false
+        reconnectAttemptCount++
+
+        val now = System.currentTimeMillis()
+
+        activeProxyMac?.let { mac ->
+            proxyCandidates[mac]?.let { candidate ->
+                proxyCandidates[mac] = candidate.copy(
+                    failCount = candidate.failCount + 1,
+                    bannedUntil = now + PROXY_BAN_DURATION_MS
+                )
+            }
+        }
+
+        val delayMs = when (reconnectAttemptCount) {
+            1 -> 2_000L
+            2 -> 5_000L
+            3 -> 10_000L
+            else -> 15_000L
+        }
+
+        nextReconnectAllowedAt = now + delayMs
+
+        Log.w(
+            TAG,
+            "Proxy koptu. activeProxyMac=$activeProxyMac attempt=$reconnectAttemptCount nextTry=${delayMs}ms"
+        )
+
+        activeProxyMac = null
+
+        if (reconnectAttemptCount >= MAX_RECONNECT_ATTEMPTS_BEFORE_RESCAN) {
+            Log.w(TAG, "Çok deneme yapıldı. Proxy adayları temizleniyor.")
+            proxyCandidates.clear()
+        }
+    }
+
+    fun onScanFinished() {
+        // Scan yönetimi MeshPresenceService içinde.
+        // MainActivity çağrıları bozulmasın diye no-op.
+    }
+
+    fun requestProxyRotation(reason: String) {
+        val now = System.currentTimeMillis()
+
+        if (now - lastRotationAt < MIN_ROTATION_INTERVAL_MS && reason != "target_mismatch") {
+            Log.w(TAG, "Proxy rotation atlandı: çok erken. reason=$reason")
+            return
+        }
+
+        if (proxyConnectInProgress) {
+            Log.w(TAG, "Proxy rotation atlandı: bağlantı zaten deneniyor. reason=$reason")
+            return
+        }
+
+        lastRotationAt = now
+        avoidProxyMac = activeProxyMac
+
+        activeProxyMac?.let { mac ->
+            proxyCandidates[mac]?.let { candidate ->
+                proxyCandidates[mac] = candidate.copy(
+                    failCount = candidate.failCount + 1,
+                    bannedUntil = now + PROXY_BAN_DURATION_MS
+                )
+            }
+        }
+
+        Log.w(TAG, "Proxy rotation istendi. reason=$reason avoidProxyMac=$avoidProxyMac")
+
+        onStatus("Proxy değiştiriliyor...")
+
+        meshProvisioner.disconnect()
+
+        proxyConnectInProgress = false
+        activeProxyMac = null
+        nextReconnectAllowedAt = 0L
+
+        mainHandler.postDelayed({
+            val selected = selectBestProxyCandidate()
+
+            if (selected != null) {
+                proxyConnectInProgress = true
+                activeProxyMac = selected.macAddress
+
+                Log.w(
+                    TAG,
+                    "Rotation sonrası proxy seçildi: ${selected.name} ${selected.macAddress}"
+                )
+
+                meshProvisioner.connectToProxy(selected.scanResult)
+            } else {
+                Log.w(TAG, "Rotation sonrası proxy adayı yok. PresenceService aday toplayacak.")
+            }
+        }, 1_000L)
+    }
+
+    fun startAutoReconnectLoop() {
+        if (autoReconnectStarted) return
+        autoReconnectStarted = true
+
+        mainHandler.postDelayed(object : Runnable {
+            override fun run() {
+                if (paused) {
+                    Log.d(TAG, "Auto reconnect loop paused.")
+                    mainHandler.postDelayed(this, LOOP_INTERVAL_MS)
+                    return
+                }
+
+                if (!meshController.isProxyReady() && !proxyConnectInProgress) {
+                    if (canTryReconnect()) {
+                        val selected = selectBestProxyCandidate()
+
+                        if (selected != null) {
+                            proxyConnectInProgress = true
+                            activeProxyMac = selected.macAddress
+
+                            Log.w(
+                                TAG,
+                                "Auto reconnect proxy seçildi: ${selected.name} ${selected.macAddress}"
+                            )
+
+                            onStatus("Proxy bağlantısı aranıyor...")
+                            meshProvisioner.connectToProxy(selected.scanResult)
+                        } else {
+                            Log.d(TAG, "Proxy adayı yok. PresenceService scan ile aday toplayacak.")
+                        }
+                    } else {
+                        Log.d(TAG, "Reconnect beklemede.")
+                    }
+                }
+
+                mainHandler.postDelayed(this, LOOP_INTERVAL_MS)
+            }
+        }, INITIAL_LOOP_DELAY_MS)
+    }
+
+    private fun selectBestProxyCandidate(): ProxyCandidate? {
+        return proxyPolicy.selectBest(
+            candidates = proxyCandidates.values,
+            avoidMac = avoidProxyMac
+        )
+    }
+
+    private fun canTryReconnect(): Boolean {
+        val now = System.currentTimeMillis()
+        return now >= nextReconnectAllowedAt
+    }
+
+    companion object {
+        private const val PAUSED_PROXY_IGNORE_LOG_EVERY = 25
+        private const val TAG = "MESH_AUTO_RECONNECT"
+
+        private const val INITIAL_LOOP_DELAY_MS = 5_000L
+        private const val LOOP_INTERVAL_MS = 10_000L
+
+        private const val MIN_ROTATION_INTERVAL_MS = 1_000L
+        private const val MAX_RECONNECT_ATTEMPTS_BEFORE_RESCAN = 3
+
+        private const val PROXY_BAN_DURATION_MS = 20_000L
+    }
+}
+
+############################################################
+END FILE: mesh/MeshAutoReconnectService.kt
+############################################################
+
+
+############################################################
+FILE: mesh/ProxySelectionPolicy.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/ProxySelectionPolicy.kt
+SUMMARY: En iyi proxy adayını seçme politikası.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.util.Log
+
+class ProxySelectionPolicy {
+
+    fun selectBest(
+        candidates: Collection<ProxyCandidate>,
+        avoidMac: String? = null
+    ): ProxyCandidate? {
+        val now = System.currentTimeMillis()
+
+        val available = candidates
+            .filter { !it.isBanned(now) }
+            .filter { avoidMac == null || !it.macAddress.equals(avoidMac, ignoreCase = true) }
+            .sortedByDescending { it.score(now) }
+
+        val selected = available.firstOrNull()
+            ?: candidates
+                .filter { !it.isBanned(now) }
+                .sortedByDescending { it.score(now) }
+                .firstOrNull()
+
+        Log.w(
+            TAG,
+            "selectBest selected=${selected?.macAddress} avoid=$avoidMac candidates=${candidates.map { "${it.macAddress}:${it.score(now)}" }}"
+        )
+
+        return selected
+    }
+
+    companion object {
+        private const val TAG = "PROXY_POLICY"
+    }
+}
+
+############################################################
+END FILE: mesh/ProxySelectionPolicy.kt
+############################################################
+
+
+############################################################
+FILE: mesh/ProxyCandidate.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/ProxyCandidate.kt
+SUMMARY: Proxy aday modeli.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import com.example.prolightmesh.ble.MeshScanResult
+
+data class ProxyCandidate(
+    val scanResult: MeshScanResult,
+    val macAddress: String,
+    val name: String,
+    val rssi: Int,
+    val firstSeenAt: Long,
+    val lastSeenAt: Long,
+    val successCount: Int = 0,
+    val failCount: Int = 0,
+    val bannedUntil: Long = 0L
+) {
+    fun isBanned(now: Long = System.currentTimeMillis()): Boolean {
+        return bannedUntil > now
+    }
+
+    fun score(now: Long = System.currentTimeMillis()): Int {
+        if (isBanned(now)) return Int.MIN_VALUE
+
+        val freshnessPenalty = ((now - lastSeenAt) / 1_000L).toInt()
+        val stabilityBonus = successCount * 8
+        val failPenalty = failCount * 20
+
+        return rssi + stabilityBonus - failPenalty - freshnessPenalty
+    }
+}
+
+############################################################
+END FILE: mesh/ProxyCandidate.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshGattManager.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshGattManager.kt
+SUMMARY: Proxy GATT bağlantı katmanı.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.bluetooth.BluetoothDevice
+import android.bluetooth.BluetoothGatt
+import android.bluetooth.BluetoothGattCharacteristic
+import android.content.Context
+import android.util.Log
+import no.nordicsemi.android.ble.BleManager
+import no.nordicsemi.android.ble.data.Data
+import java.util.UUID
+
+class MeshGattManager(
+    context: Context,
+    private val isProxy: Boolean = false,
+    private val onConnected: () -> Unit,
+    private val onDisconnected: () -> Unit,
+    private val onDataReceived: (ByteArray) -> Unit,
+    private val onDataSent: (ByteArray) -> Unit
+) : BleManager(context) {
+
+    private var dataInCharacteristic: BluetoothGattCharacteristic? = null
+    private var dataOutCharacteristic: BluetoothGattCharacteristic? = null
+
+    private val serviceUuid = if (isProxy) MESH_PROXY_SERVICE_UUID else MESH_PROVISIONING_SERVICE_UUID
+    private val dataInUuid = if (isProxy) MESH_PROXY_DATA_IN_UUID else MESH_PROVISIONING_DATA_IN_UUID
+    private val dataOutUuid = if (isProxy) MESH_PROXY_DATA_OUT_UUID else MESH_PROVISIONING_DATA_OUT_UUID
+
+    override fun getGattCallback(): BleManagerGattCallback {
+        return object : BleManagerGattCallback() {
+
+            override fun isRequiredServiceSupported(gatt: BluetoothGatt): Boolean {
+                val service = gatt.getService(serviceUuid)
+                dataInCharacteristic = service?.getCharacteristic(dataInUuid)
+                dataOutCharacteristic = service?.getCharacteristic(dataOutUuid)
+
+                val supported = dataInCharacteristic != null && dataOutCharacteristic != null
+                Log.d(TAG, "GATT service supported: $supported (isProxy=$isProxy)")
+                return supported
+            }
+
+            override fun initialize() {
+                setNotificationCallback(dataOutCharacteristic)
+                    .with { _, data ->
+                        val bytes = data.value ?: return@with
+                        Log.d(TAG, "RX: ${bytes.toHex()}")
+                        onDataReceived(bytes)
+                    }
+
+                enableNotifications(dataOutCharacteristic)
+                    .done {
+                        Log.d(TAG, "Notifications enabled")
+                        onConnected()
+                    }
+                    .enqueue()
+
+                requestMtu(517).enqueue()
+            }
+
+            override fun onServicesInvalidated() {
+                dataInCharacteristic = null
+                dataOutCharacteristic = null
+                onDisconnected()
+            }
+        }
+    }
+
+    fun connectTo(device: BluetoothDevice) {
+        Log.d(TAG, "Bağlanıyor (isProxy=$isProxy): ${device.address}")
+        connect(device).retry(3, 200).useAutoConnect(false).enqueue()
+    }
+
+    fun sendPdu(pdu: ByteArray) {
+        val characteristic = dataInCharacteristic ?: run {
+            Log.e(TAG, "Data In characteristic yok")
+            return
+        }
+
+        Log.d(TAG, "TX hazırlanıyor (${pdu.size} byte): ${pdu.toHex()}")
+
+        writeCharacteristic(
+            characteristic,
+            Data(pdu),
+            BluetoothGattCharacteristic.WRITE_TYPE_NO_RESPONSE
+        )
+            .split()
+            .done {
+                Log.d(TAG, "TX done: ${pdu.toHex()}")
+                onDataSent(pdu)
+            }
+            .fail { _, status ->
+                Log.e(TAG, "TX fail status=$status data=${pdu.toHex()}")
+            }
+            .enqueue()
+    }
+
+    fun closeConnection() {
+        disconnect().enqueue()
+    }
+
+    private fun ByteArray.toHex(): String {
+        return joinToString(" ") { "%02X".format(it) }
+    }
+
+    companion object {
+        private const val TAG = "MESH_GATT"
+
+        private val MESH_PROVISIONING_SERVICE_UUID: UUID = UUID.fromString("00001827-0000-1000-8000-00805f9b34fb")
+        private val MESH_PROVISIONING_DATA_IN_UUID: UUID = UUID.fromString("00002adb-0000-1000-8000-00805f9b34fb")
+        private val MESH_PROVISIONING_DATA_OUT_UUID: UUID = UUID.fromString("00002adc-0000-1000-8000-00805f9b34fb")
+
+        private val MESH_PROXY_SERVICE_UUID: UUID = UUID.fromString("00001828-0000-1000-8000-00805f9b34fb")
+        private val MESH_PROXY_DATA_IN_UUID: UUID = UUID.fromString("00002add-0000-1000-8000-00805f9b34fb")
+        private val MESH_PROXY_DATA_OUT_UUID: UUID = UUID.fromString("00002ade-0000-1000-8000-00805f9b34fb")
+    }
+}
+
+############################################################
+END FILE: mesh/MeshGattManager.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshController.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshController.kt
+SUMMARY: Proxy filter ve PDU path yönetimi.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.content.Context
+import android.util.Log
+import no.nordicsemi.android.mesh.MeshManagerApi
+import no.nordicsemi.android.mesh.MeshManagerCallbacks
+import no.nordicsemi.android.mesh.MeshNetwork
+import no.nordicsemi.android.mesh.MeshProvisioningStatusCallbacks
+import no.nordicsemi.android.mesh.MeshStatusCallbacks
+import no.nordicsemi.android.mesh.provisionerstates.ProvisioningState
+import no.nordicsemi.android.mesh.provisionerstates.UnprovisionedMeshNode
+import no.nordicsemi.android.mesh.transport.ControlMessage
+import no.nordicsemi.android.mesh.transport.MeshMessage
+import no.nordicsemi.android.mesh.transport.ProvisionedMeshNode
+import no.nordicsemi.android.mesh.transport.ProxyConfigAddAddressToFilter
+import no.nordicsemi.android.mesh.transport.ProxyConfigSetFilterType
+import no.nordicsemi.android.mesh.utils.AddressArray
+import no.nordicsemi.android.mesh.utils.ProxyFilterType
+import java.util.UUID
+import android.os.Handler
+import android.os.Looper
+class MeshController(context: Context) {
+
+    val meshManagerApi = MeshManagerApi(context)
+
+    var pduSender: ((ByteArray) -> Unit)? = null
+    var onProvisioningStatus: ((String) -> Unit)? = null
+    var onUnprovisionedNodeReady: ((UnprovisionedMeshNode) -> Unit)? = null
+    var onMeshMessageReceived: ((Int, MeshMessage) -> Unit)? = null
+
+    var lastUnprovisionedNode: UnprovisionedMeshNode? = null
+
+    var onVendorStateReceived: ((Int, Char, Int) -> Unit)? = null
+
+    var onConfigMessageReceived: ((Int, String) -> Unit)? = null
+
+    private var currentMtu: Int = 20
+
+
+    init {
+
+
+
+        meshManagerApi.setMeshManagerCallbacks(object : MeshManagerCallbacks {
+            override fun onNetworkLoaded(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network yüklendi")
+                setupAppKeyIfNeeded(meshNetwork)
+            }
+
+            override fun onNetworkLoadFailed(error: String) {
+                Log.e(TAG, "Mesh network yüklenemedi: $error")
+            }
+
+            override fun onNetworkUpdated(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network güncellendi")
+            }
+
+            override fun onNetworkImported(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network import edildi")
+            }
+
+            override fun onNetworkImportFailed(error: String) {
+                Log.e(TAG, "Mesh network import hatası: $error")
+            }
+
+            override fun onMeshPduCreated(pdu: ByteArray) {
+                Log.d(TAG, "Mesh PDU oluşturuldu: ${pdu.toHex()}")
+                pduSender?.invoke(pdu)
+            }
+
+            override fun sendProvisioningPdu(meshNode: UnprovisionedMeshNode, pdu: ByteArray) {
+                Log.d(TAG, "Provisioning PDU oluşturuldu: ${pdu.toHex()}")
+                pduSender?.invoke(pdu)
+            }
+
+            override fun getMtu(): Int {
+                return currentMtu
+            }
+        })
+
+        meshManagerApi.setMeshStatusCallbacks(object : MeshStatusCallbacks {
+            override fun onTransactionFailed(dst: Int, hasIncompleteTimerExpired: Boolean) {
+                Log.e(TAG, "Transaction failed -> Dst: ${dst.toString(16)}")
+            }
+
+            override fun onUnknownPduReceived(src: Int, accessPayload: ByteArray?) {
+                val hex = accessPayload?.joinToString(" ") { "%02X".format(it) } ?: "null"
+                Log.w(TAG, "Unknown PDU received -> Src: 0x${src.toString(16)} Payload: $hex")
+            }
+
+            override fun onBlockAcknowledgementProcessed(dst: Int, message: ControlMessage) {}
+
+            override fun onBlockAcknowledgementReceived(src: Int, message: ControlMessage) {}
+
+            override fun onMeshMessageProcessed(dst: Int, meshMessage: MeshMessage) {
+                Log.d(TAG, "Mesh TX done -> dst: ${dst.toString(16)}, msg: ${meshMessage.javaClass.simpleName}")
+            }
+
+            override fun onMeshMessageReceived(src: Int, msg: MeshMessage) {
+                Log.d("MESH_DEBUG", "📥 MESAJ KAPIDA! Kimden: 0x${src.toString(16)} | Sinif: ${msg.javaClass.simpleName}")
+
+                var payload: ByteArray? = null
+
+                if (msg is no.nordicsemi.android.mesh.transport.VendorModelMessageStatus) {
+                    Log.d("MESH_DEBUG", "👉 Gelen mesaj STATUS tipi")
+                    payload = msg.parameters
+                } else if (msg is no.nordicsemi.android.mesh.transport.VendorModelMessageUnacked) {
+                    Log.d("MESH_DEBUG", "👉 Gelen mesaj UNACKED tipi")
+                    payload = msg.parameters
+                } else {
+
+                    val className = msg.javaClass.simpleName
+
+                    Log.d(
+                        "MESH_DEBUG",
+                        "📨 CONFIG/OTHER mesaj geldi -> $className"
+                    )
+
+                    when (className) {
+
+                        "ConfigAppKeyStatus",
+                        "ConfigModelAppStatus",
+                        "ConfigModelSubscriptionStatus",
+                        "ConfigModelPublicationStatus" -> {
+
+                            Log.i(
+                                "MESH_DEBUG",
+                                "✅ CONFIG ACK -> src=0x${src.toString(16)} type=$className"
+                            )
+
+                            onConfigMessageReceived?.invoke(src, className)
+                        }
+
+                        else -> {
+                            Log.d(
+                                "MESH_DEBUG",
+                                "❓ Bizi ilgilendirmeyen mesaj tipi: $className"
+                            )
+                        }
+                    }
+                }
+
+                if (payload != null && payload.size >= 3) {
+                    val type = payload[0].toInt().toChar()
+                    val value = ((payload[2].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+
+                    Log.i("MESH_DEBUG", "🔥 PAKET COZULDU -> Tip: $type, Deger: $value")
+                    onVendorStateReceived?.invoke(src, type, value)
+                } else if (payload != null) {
+                    Log.w("MESH_DEBUG", "⚠️ Payload var ama boyutu kucuk: ${payload.size}")
+                }
+
+                onMeshMessageReceived?.invoke(src, msg)
+            }
+
+            override fun onMessageDecryptionFailed(meshLayer: String?, errorMessage: String?) {
+                Log.e(TAG, "Decryption failed -> layer=$meshLayer error=$errorMessage")
+            }
+
+            override fun onHeartbeatMessageReceived(src: Int, message: ControlMessage) {
+                Log.d(TAG, "Heartbeat received -> Src: ${src.toString(16)}")
+            }
+        })
+
+        meshManagerApi.setProvisioningStatusCallbacks(object : MeshProvisioningStatusCallbacks {
+            override fun onProvisioningStateChanged(
+                meshNode: UnprovisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray?
+            ) {
+                lastUnprovisionedNode = meshNode
+                val msg = "Provision state: $state"
+                Log.d(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+
+                if (state.name.contains("CAPABILITIES", ignoreCase = true)) {
+                    Log.d(TAG, "Capabilities geldi. Node startProvisioning için hazır.")
+                    onUnprovisionedNodeReady?.invoke(meshNode)
+                }
+            }
+
+            override fun onProvisioningFailed(
+                meshNode: UnprovisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray
+            ) {
+                val msg = "Provision FAILED: $state / data: ${data.toHex()}"
+                Log.e(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+            }
+
+            override fun onProvisioningCompleted(
+                meshNode: ProvisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray
+            ) {
+                val msg = "Provision COMPLETED: $state / address: ${meshNode.unicastAddress}"
+                Log.d(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+            }
+        })
+
+        meshManagerApi.loadMeshNetwork()
+        Log.d(TAG, "MeshController başlatıldı. MTU: $currentMtu")
+    }
+
+    private fun setupAppKeyIfNeeded(network: MeshNetwork) {
+
+        try {
+            network.setGlobalTtl(7)
+
+            Log.i(
+                TAG,
+                "TTL_DEBUG global TTL set to ${network.getGlobalTtl()}"
+            )
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "TTL_DEBUG global TTL set failed: ${e.message}",
+                e
+            )
+        }
+
+        if (network.appKeys.isEmpty()) {
+
+            val appKey = network.createAppKey()
+            network.addAppKey(appKey)
+
+            Log.d(
+                TAG,
+                "Ağ için yeni AppKey oluşturuldu: ${appKey.keyIndex}"
+            )
+
+        } else {
+
+            Log.d(
+                TAG,
+                "Ağda mevcut AppKey var: ${network.appKeys[0].keyIndex}"
+            )
+        }
+    }
+    /**
+     * Proxy GATT bağlantısı kurulduktan sonra çağırılır.
+     * Telefonun cevapları alabilmesi için Proxy Filter'a provisioner adresini ve ana grup adresini ekler.
+     */
+
+
+    fun setupProxyFilter() {
+        val network = meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "PROXY_FILTER_DEBUG ayarlanamadı: network yok")
+            return
+        }
+
+        val provisionerAddress = network.provisionerAddress ?: run {
+            Log.e(TAG, "PROXY_FILTER_DEBUG ayarlanamadı: provisioner address yok")
+            return
+        }
+
+        val groupAddress = MeshConfigurator.GROUP_ALL_LIGHTS
+        val handler = Handler(Looper.getMainLooper())
+
+        try {
+            Log.i(TAG, "PROXY_FILTER_DEBUG ===== START =====")
+            Log.i(TAG, "PROXY_FILTER_DEBUG provisioner=0x${provisionerAddress.toString(16)}")
+            Log.i(TAG, "PROXY_FILTER_DEBUG group=0x${groupAddress.toString(16)}")
+            Log.i(TAG, "PROXY_FILTER_DEBUG nodeCount=${network.nodes.size}")
+
+            val setInclusionFilter = ProxyConfigSetFilterType(
+                ProxyFilterType(ProxyFilterType.INCLUSION_LIST_FILTER)
+            )
+
+            Log.i(TAG, "PROXY_FILTER_DEBUG SetFilterType -> INCLUSION")
+            meshManagerApi.createMeshPdu(provisionerAddress, setInclusionFilter)
+
+            val addresses = mutableListOf<Int>()
+
+            addresses.add(provisionerAddress)
+
+            network.nodes.forEach { node ->
+                Log.i(
+                    TAG,
+                    "PROXY_FILTER_DEBUG node=${node.nodeName} unicast=0x${node.unicastAddress.toString(16)} elements=${node.elements.size}"
+                )
+
+                if (node.unicastAddress != provisionerAddress) {
+                    addresses.add(node.unicastAddress)
+                }
+            }
+
+            addresses.add(groupAddress)
+
+            var delay = 300L
+
+            addresses.forEach { address ->
+                handler.postDelayed({
+                    Log.i(TAG, "PROXY_FILTER_DEBUG AddAddress single -> 0x${address.toString(16)}")
+
+                    val addAddress = ProxyConfigAddAddressToFilter(
+                        listOf(toAddressArray(address))
+                    )
+
+                    meshManagerApi.createMeshPdu(provisionerAddress, addAddress)
+                }, delay)
+
+                delay += 300L
+            }
+
+            handler.postDelayed({
+                Log.i(TAG, "PROXY_FILTER_DEBUG totalAddressAdded=${addresses.size}")
+                Log.i(TAG, "PROXY_FILTER_DEBUG ===== DONE =====")
+            }, delay + 100L)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "PROXY_FILTER_DEBUG hata: ${e.message}", e)
+        }
+    }
+
+    private fun toAddressArray(address: Int): AddressArray {
+        val high = ((address shr 8) and 0xFF).toByte()
+        val low = (address and 0xFF).toByte()
+        return AddressArray(high, low)
+    }
+
+    fun handleIncomingProvisioningPdu(pdu: ByteArray) {
+        try {
+            meshManagerApi.handleNotifications(currentMtu, pdu)
+        } catch (e: NullPointerException) {
+            Log.w(
+                TAG,
+                "Nordic SDK proxy parse NPE yakalandi, paket ignore edildi: ${pdu.joinToString(" ") { "%02X".format(it) }}"
+            )
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "Mesh notification parse hatasi: ${e.message}, pdu=${pdu.joinToString(" ") { "%02X".format(it) }}",
+                e
+            )
+        }
+    }
+
+    fun handleProvisioningPduSent(pdu: ByteArray) {
+        meshManagerApi.handleWriteCallbacks(currentMtu, pdu)
+    }
+
+    fun identifyNode(deviceUuid: UUID, attentionSeconds: Int = 5) {
+        meshManagerApi.identifyNode(deviceUuid, attentionSeconds)
+    }
+
+    fun startProvisioning(meshNode: UnprovisionedMeshNode) {
+        val network = meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "Provision başlatılamadı: Mesh network yok")
+            onProvisioningStatus?.invoke("❌ Mesh network yok")
+            return
+        }
+
+        try {
+            val capabilities = meshNode.provisioningCapabilities
+            val elementCount = (capabilities?.numberOfElements ?: 1).toInt()
+            val provisioner = network.selectedProvisioner
+
+            val nextAddress = network.nextAvailableUnicastAddress(elementCount, provisioner)
+            network.assignUnicastAddress(nextAddress)
+
+            Log.i(TAG, "Yeni node için unicast atandı: 0x${nextAddress.toString(16)}")
+            onProvisioningStatus?.invoke("Node adresi atandı: 0x${nextAddress.toString(16)}")
+
+            meshManagerApi.startProvisioning(meshNode)
+        } catch (e: Exception) {
+            Log.e(TAG, "Provision address atama hatası: ${e.message}", e)
+            onProvisioningStatus?.invoke("❌ Provision address hatası: ${e.message}")
+        }
+    }
+
+    fun isProxyReady(): Boolean {
+        return pduSender != null
+    }
+
+    fun sendMeshMessage(dstAddress: Int, msg: MeshMessage) {
+        try {
+            Log.i(
+                TAG,
+                "SEQ_DEBUG BEFORE TX -> dst=0x${dstAddress.toString(16)} msg=${msg.javaClass.simpleName} seq=${dumpSequenceNumbers()}"
+            )
+
+            meshManagerApi.createMeshPdu(dstAddress, msg)
+
+            Log.i(
+                TAG,
+                "SEQ_DEBUG AFTER TX -> dst=0x${dstAddress.toString(16)} msg=${msg.javaClass.simpleName} seq=${dumpSequenceNumbers()}"
+            )
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Mesaj PDU OLUŞTURMA HATASI: ${e.message}", e)
+            onProvisioningStatus?.invoke("❌ SİSTEM HATASI: ${e.message}")
+        }
+    }
+
+    private fun dumpSequenceNumbers(): String {
+        val network = meshManagerApi.meshNetwork ?: return "network=null"
+        val sparse = network.sequenceNumbers ?: return "sequenceNumbers=null"
+
+        if (sparse.size() == 0) {
+            return "empty"
+        }
+
+        return buildString {
+            append("[")
+            for (i in 0 until sparse.size()) {
+                val key = sparse.keyAt(i)
+                val value = sparse.valueAt(i)
+
+                append("0x${key.toString(16)}=$value")
+
+                if (i < sparse.size() - 1) {
+                    append(", ")
+                }
+            }
+            append("]")
+        }
+    }
+
+    private fun ByteArray.toHex(): String {
+        return joinToString(" ") { "%02X".format(it) }
+    }
+
+    companion object {
+        private const val TAG = "MESH_CORE"
+    }
+}
+
+############################################################
+END FILE: mesh/MeshController.kt
+############################################################
+

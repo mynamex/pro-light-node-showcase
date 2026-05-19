@@ -1,0 +1,82 @@
+============================================================
+ANDROID FILE MANIFEST
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+## MODULE: 01_PROVISIONING_FLOW.txt
+
+- [OK] MainActivity.kt (32813 bytes) — App bootstrap. Provisioner, orchestrator, screens and lifecycle wiring.
+- [OK] mesh/MeshProvisioner.kt (6805 bytes) — Provisioning: cihazı BLE Mesh ağına alma süreci.
+- [OK] mesh/MeshSetupOrchestrator.kt (3616 bytes) — Provision akışını koordine eden orchestration katmanı.
+- [OK] mesh/MeshGattManager.kt (4381 bytes) — BLE GATT bağlantısı, servis keşfi, TX/RX taşıma katmanı.
+- [OK] mesh/MeshController.kt (15647 bytes) — Nordic MeshManagerApi wrapper ve mesh PDU gönderim merkezi.
+- [OK] ui/screens/NewDeviceScreen.kt (5098 bytes) — Yeni cihaz arama ve provision başlatma ekranı.
+- [OK] ui/dialogs/ProvisionProgressDialog.kt (2128 bytes) — Provision ilerleme UI dialog.
+- [OK] ui/dialogs/DeviceSetupDialog.kt (5171 bytes) — Provision sonrası cihaz setup dialog.
+
+## MODULE: 02_CONFIG_FLOW.txt
+
+- [OK] mesh/MeshConfigurator.kt (5858 bytes) — Low-level config mesajları: AppKey, Bind, Subscribe, Publish.
+- [OK] mesh/MeshConfigService.kt (8900 bytes) — ACK/state-driven config service.
+- [OK] storage/MeshLocalStore.kt (13663 bytes) — Node config state, stored node/group bilgileri.
+- [OK] storage/StoredNode.kt (648 bytes) — Persist edilen node modeli.
+- [OK] storage/StoredGroup.kt (110 bytes) — Persist edilen group modeli.
+
+## MODULE: 03_PROXY_RECONNECT_FLOW.txt
+
+- [OK] mesh/MeshAutoReconnectService.kt (9626 bytes) — Proxy discovery ve reconnect döngüsü.
+- [OK] mesh/ProxySelectionPolicy.kt (988 bytes) — En iyi proxy adayını seçme politikası.
+- [OK] mesh/ProxyCandidate.kt (822 bytes) — Proxy aday modeli.
+
+## MODULE: 04_PRESENCE_ONLINE_FLOW.txt
+
+- [OK] mesh/MeshPresenceService.kt (2573 bytes) — Presence scan: cihaz online/stale/offline takibi.
+- [OK] ble/BleScannerManager.kt (7140 bytes) — BLE scan ve cihaz sınıflandırma.
+- [OK] ble/MeshScanResult.kt (435 bytes) — Scan result modeli.
+- [OK] ble/BlePermissionHelper.kt (1700 bytes) — BLE permission yardımcı sınıfı.
+- [OK] ui/screens/NetworkScreen.kt (1872 bytes) — Network online/offline gösterimi.
+
+## MODULE: 05_COMMAND_PROTOCOL_V2_FLOW.txt
+
+- [OK] mesh/MeshCommandService.kt (5675 bytes) — Work ekranından gelen komutların service katmanı.
+- [OK] mesh/MeshCommander.kt (6783 bytes) — Vendor model unicast/group komut gönderimi.
+- [OK] mesh/protocol/ProLightCommandIds.kt (294 bytes) — V2 command id sabitleri.
+- [OK] mesh/protocol/ProLightV2PacketBuilder.kt (933 bytes) — 12 byte V2 packet builder.
+- [OK] mesh/protocol/ProLightCueManager.kt (297 bytes) — Cue ID / scheduled command yönetimi.
+- [OK] mesh/protocol/TimeSyncService.kt (3749 bytes) — Android tarafı TIME_SYNC yönetimi.
+- [OK] ui/screens/WorkScreen.kt (4268 bytes) — Work ana ekranı.
+- [OK] ui/work/WorkEffectTabView.kt (4599 bytes) — Effect komutları UI.
+- [OK] ui/work/WorkColorTabView.kt (1936 bytes) — Color komutları UI.
+- [OK] ui/work/WorkLightTabView.kt (5185 bytes) — Light control UI.
+- [OK] ui/work/WorkFanTabView.kt (4597 bytes) — Fan control UI.
+- [OK] ui/work/WorkGroupControlDialog.kt (4870 bytes) — Group control dialog.
+
+## MODULE: 06_UI_STORAGE_FLOW.txt
+
+- [OK] ui/navigation/AppNavigator.kt (2510 bytes) — Screen navigation.
+- [OK] ui/navigation/BottomNavView.kt (1516 bytes) — Bottom nav UI.
+- [OK] ui/screens/GroupsScreen.kt (4405 bytes) — Group management screen.
+- [OK] ui/components/ColorWheelPanel.kt (4756 bytes) — Color wheel UI component.
+- [OK] ui/components/DeviceMiniCard.kt (5951 bytes) — Mini device card.
+- [OK] ui/components/GroupFolderCard.kt (2038 bytes) — Group folder card.
+- [OK] ui/components/NodeCardView.kt (3309 bytes) — Node card view.
+- [OK] ui/components/ProSlider.kt (2794 bytes) — Custom slider.
+- [OK] ui/components/RadarScannerView.kt (2353 bytes) — Radar scan UI.

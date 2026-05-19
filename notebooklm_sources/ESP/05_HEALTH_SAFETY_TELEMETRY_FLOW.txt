@@ -1,0 +1,670 @@
+============================================================
+ESP 05 HEALTH SAFETY TELEMETRY FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: src/control/health/LightRuntimeHealth.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/health/LightRuntimeHealth.cpp
+SUMMARY: Runtime health checks.
+############################################################
+
+#include "LightRuntimeHealth.h"
+
+#include "esp_log.h"
+#include "esp_timer.h"
+
+#define TAG "LIGHT_HEALTH"
+
+static uint32_t s_lastCommandMs = 0;
+static uint32_t s_commandAcceptedCount = 0;
+static uint32_t s_commandDroppedCount = 0;
+static uint32_t s_lastHealthLogMs = 0;
+
+static uint32_t nowMs()
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+void LightRuntimeHealth::init()
+{
+    s_lastCommandMs = nowMs();
+    s_lastHealthLogMs = nowMs();
+    s_commandAcceptedCount = 0;
+    s_commandDroppedCount = 0;
+    
+}
+
+void LightRuntimeHealth::notifyCommandAccepted()
+{
+    s_lastCommandMs = nowMs();
+    s_commandAcceptedCount++;
+}
+
+void LightRuntimeHealth::notifyCommandDropped()
+{
+    s_commandDroppedCount++;
+}
+
+uint32_t LightRuntimeHealth::getLastCommandAgeMs()
+{
+    return nowMs() - s_lastCommandMs;
+}
+
+uint32_t LightRuntimeHealth::getCommandAcceptedCount()
+{
+    return s_commandAcceptedCount;
+}
+
+uint32_t LightRuntimeHealth::getCommandDroppedCount()
+{
+    return s_commandDroppedCount;
+}
+
+bool LightRuntimeHealth::hasRecentCommand(uint32_t timeoutMs)
+{
+    return getLastCommandAgeMs() <= timeoutMs;
+}
+
+void LightRuntimeHealth::logPeriodic(uint32_t intervalMs)
+{
+    uint32_t now = nowMs();
+
+    if ((now - s_lastHealthLogMs) < intervalMs) {
+        return;
+    }
+
+    s_lastHealthLogMs = now;
+
+    ESP_LOGI(
+        TAG,
+        "HEALTH | accepted=%lu dropped=%lu lastCommandAgeMs=%lu",
+        s_commandAcceptedCount,
+        s_commandDroppedCount,
+        getLastCommandAgeMs()
+    );
+}
+
+############################################################
+END FILE: src/control/health/LightRuntimeHealth.cpp
+############################################################
+
+
+############################################################
+FILE: src/control/health/LightRuntimeHealth.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/health/LightRuntimeHealth.h
+SUMMARY: Health declarations.
+############################################################
+
+#ifndef LIGHT_RUNTIME_HEALTH_H
+#define LIGHT_RUNTIME_HEALTH_H
+
+#include <stdint.h>
+
+
+class LightRuntimeHealth {
+public:
+    static void init();
+
+    static void notifyCommandAccepted();
+    static void notifyCommandDropped();
+
+    static uint32_t getLastCommandAgeMs();
+    static uint32_t getCommandAcceptedCount();
+    static uint32_t getCommandDroppedCount();
+    static void logPeriodic(uint32_t intervalMs);
+
+    static bool hasRecentCommand(uint32_t timeoutMs);
+};
+
+#endif
+
+############################################################
+END FILE: src/control/health/LightRuntimeHealth.h
+############################################################
+
+
+############################################################
+FILE: src/control/safety/LightSafety.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/safety/LightSafety.cpp
+SUMMARY: Safety layer.
+############################################################
+
+// LightSafety.cpp
+#include "LightSafety.h"
+
+uint16_t LightSafety::clampChannel(uint16_t value)
+{
+    return value > 1023 ? 1023 : value;
+}
+
+bool LightSafety::isValidEffect(uint16_t value)
+{
+    return value <= EFFECT_LIGHTNING;
+}
+
+bool LightSafety::isValidFanMode(uint16_t value)
+{
+    return value <= 4;
+}
+
+############################################################
+END FILE: src/control/safety/LightSafety.cpp
+############################################################
+
+
+############################################################
+FILE: src/control/safety/LightSafety.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/safety/LightSafety.h
+SUMMARY: Safety declarations.
+############################################################
+
+// LightSafety.h
+#ifndef LIGHT_SAFETY_H
+#define LIGHT_SAFETY_H
+
+#include <stdint.h>
+#include "LightEffectType.h"
+
+class LightSafety {
+public:
+    static uint16_t clampChannel(uint16_t value);
+    static bool isValidEffect(uint16_t value);
+    static bool isValidFanMode(uint16_t value);
+};
+
+#endif
+
+############################################################
+END FILE: src/control/safety/LightSafety.h
+############################################################
+
+
+############################################################
+FILE: src/telemetry/TelemetryBridge.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/telemetry/TelemetryBridge.cpp
+SUMMARY: Telemetry bridge.
+############################################################
+
+#include "TelemetryBridge.h"
+
+#include "FanManager.h"
+#include "ThermalManager.h"
+#include "LightRuntimeHealth.h"
+
+uint16_t telemetry_get_temperature_x10(void)
+{
+    float temp = ThermalManager::getTemperatureC();
+
+    if (temp < 0.0f) {
+        temp = 0.0f;
+    }
+
+    if (temp > 6553.5f) {
+        temp = 6553.5f;
+    }
+
+    return (uint16_t)(temp * 10.0f);
+}
+
+uint16_t telemetry_get_fan_mode(void)
+{
+    return (uint16_t)FanManager::getMode();
+}
+
+uint16_t telemetry_get_fan_speed_percent(void)
+{
+    return (uint16_t)FanManager::getFanSpeedPercent();
+}
+
+uint16_t telemetry_get_thermal_status(void)
+{
+    return (uint16_t)ThermalManager::getStatus();
+}
+
+uint16_t telemetry_get_command_dropped_count(void)
+{
+    uint32_t count = LightRuntimeHealth::getCommandDroppedCount();
+    return count > 65535 ? 65535 : (uint16_t)count;
+}
+
+uint16_t telemetry_get_command_accepted_count(void)
+{
+    uint32_t count = LightRuntimeHealth::getCommandAcceptedCount();
+    return count > 65535 ? 65535 : (uint16_t)count;
+}
+
+############################################################
+END FILE: src/telemetry/TelemetryBridge.cpp
+############################################################
+
+
+############################################################
+FILE: src/telemetry/TelemetryBridge.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/telemetry/TelemetryBridge.h
+SUMMARY: Telemetry declarations.
+############################################################
+
+#ifndef TELEMETRY_BRIDGE_H
+#define TELEMETRY_BRIDGE_H
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+uint16_t telemetry_get_temperature_x10(void);
+uint16_t telemetry_get_fan_mode(void);
+uint16_t telemetry_get_fan_speed_percent(void);
+uint16_t telemetry_get_thermal_status(void);
+uint16_t telemetry_get_command_dropped_count(void);
+uint16_t telemetry_get_command_accepted_count(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
+
+############################################################
+END FILE: src/telemetry/TelemetryBridge.h
+############################################################
+
+
+############################################################
+FILE: src/thermal/ThermalManager.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/thermal/ThermalManager.cpp
+SUMMARY: Thermal manager.
+############################################################
+
+#include "ThermalManager.h"
+
+#include "esp_log.h"
+
+#define TAG "THERMAL_MANAGER"
+
+static float s_temperatureC = 0.0f;
+static ThermalStatus s_status = THERMAL_STATUS_SENSOR_MISSING;
+static uint8_t s_outputLimitPercent = 100;
+
+void ThermalManager::init()
+{
+    s_temperatureC = 0.0f;
+    s_status = THERMAL_STATUS_SENSOR_MISSING;
+    s_outputLimitPercent = 100;
+
+    ESP_LOGI(TAG, "Thermal manager hazir. Sensor henuz aktif degil.");
+}
+
+void ThermalManager::update()
+{
+    // TODO:
+    // Buraya ileride gercek sensor okuma gelecek.
+    // Simdilik sensor yok kabul ediyoruz ama output kisitlamiyoruz.
+
+    s_status = THERMAL_STATUS_SENSOR_MISSING;
+    s_outputLimitPercent = 100;
+}
+
+float ThermalManager::getTemperatureC()
+{
+    return s_temperatureC;
+}
+
+ThermalStatus ThermalManager::getStatus()
+{
+    return s_status;
+}
+
+uint8_t ThermalManager::getOutputLimitPercent()
+{
+    return s_outputLimitPercent;
+}
+
+############################################################
+END FILE: src/thermal/ThermalManager.cpp
+############################################################
+
+
+############################################################
+FILE: src/thermal/ThermalManager.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/thermal/ThermalManager.h
+SUMMARY: Thermal manager declarations.
+############################################################
+
+#ifndef THERMAL_MANAGER_H
+#define THERMAL_MANAGER_H
+
+#include <stdint.h>
+#include "ThermalState.h"
+
+class ThermalManager {
+public:
+    static void init();
+    static void update();
+
+    static float getTemperatureC();
+    static ThermalStatus getStatus();
+
+    static uint8_t getOutputLimitPercent();
+};
+
+#endif
+
+############################################################
+END FILE: src/thermal/ThermalManager.h
+############################################################
+
+
+############################################################
+FILE: src/thermal/ThermalSensor.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/thermal/ThermalSensor.cpp
+SUMMARY: Thermal sensor.
+############################################################
+
+
+
+############################################################
+END FILE: src/thermal/ThermalSensor.cpp
+############################################################
+
+
+############################################################
+FILE: src/thermal/ThermalSensor.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/thermal/ThermalSensor.h
+SUMMARY: Thermal sensor declarations.
+############################################################
+
+
+
+############################################################
+END FILE: src/thermal/ThermalSensor.h
+############################################################
+
+
+############################################################
+FILE: src/thermal/ThermalState.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/thermal/ThermalState.h
+SUMMARY: Thermal state model.
+############################################################
+
+#ifndef THERMAL_STATE_H
+#define THERMAL_STATE_H
+
+enum ThermalStatus {
+    THERMAL_STATUS_NORMAL = 0,
+    THERMAL_STATUS_LIMITING = 1,
+    THERMAL_STATUS_CRITICAL = 2,
+    THERMAL_STATUS_SENSOR_MISSING = 3
+};
+
+#endif
+
+############################################################
+END FILE: src/thermal/ThermalState.h
+############################################################
+
+
+############################################################
+FILE: src/fan/FanManager.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/fan/FanManager.cpp
+SUMMARY: Fan manager.
+############################################################
+
+#include "FanManager.h"
+
+#include "esp_log.h"
+
+#include "FanDriver.h"
+
+#define TAG "FAN_MANAGER"
+
+static FanMode s_mode = FAN_MODE_AUTO;
+static uint8_t s_currentFanSpeedPercent = 0;
+
+void FanManager::init()
+{
+    s_mode = FAN_MODE_AUTO;
+    s_currentFanSpeedPercent = 0;
+
+    FanDriver::init();
+
+    ESP_LOGI(TAG, "Fan manager hazir. Mode=AUTO");
+}
+
+void FanManager::setMode(FanMode mode)
+{
+    s_mode = mode;
+
+    ESP_LOGI(TAG, "Fan mode set edildi: %d", (int)mode);
+}
+
+FanMode FanManager::getMode()
+{
+    return s_mode;
+}
+
+uint8_t FanManager::getFanSpeedPercent()
+{
+    return s_currentFanSpeedPercent;
+}
+
+uint8_t FanManager::getOutputLimitPercent()
+{
+    switch (s_mode) {
+        case FAN_MODE_SILENT:
+            return 40;
+
+        case FAN_MODE_LOW:
+            return 60;
+
+        case FAN_MODE_MEDIUM:
+            return 80;
+
+        case FAN_MODE_HIGH:
+            return 100;
+
+        case FAN_MODE_AUTO:
+        default:
+            return 100;
+    }
+}
+
+void FanManager::update()
+{
+    uint8_t targetSpeed = 0;
+
+    switch (s_mode) {
+        case FAN_MODE_SILENT:
+            targetSpeed = 0;
+            break;
+
+        case FAN_MODE_LOW:
+            targetSpeed = 25;
+            break;
+
+        case FAN_MODE_MEDIUM:
+            targetSpeed = 50;
+            break;
+
+        case FAN_MODE_HIGH:
+            targetSpeed = 100;
+            break;
+
+        case FAN_MODE_AUTO:
+        default:
+            targetSpeed = 40;
+            break;
+    }
+
+    if (targetSpeed != s_currentFanSpeedPercent) {
+        s_currentFanSpeedPercent = targetSpeed;
+        FanDriver::setSpeedPercent(s_currentFanSpeedPercent);
+    }
+}
+
+############################################################
+END FILE: src/fan/FanManager.cpp
+############################################################
+
+
+############################################################
+FILE: src/fan/FanManager.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/fan/FanManager.h
+SUMMARY: Fan manager declarations.
+############################################################
+
+#ifndef FAN_MANAGER_H
+#define FAN_MANAGER_H
+
+#include <stdint.h>
+#include "FanState.h"
+
+class FanManager {
+public:
+    static void init();
+
+    static void setMode(FanMode mode);
+
+    static FanMode getMode();
+
+    static uint8_t getFanSpeedPercent();
+
+    static uint8_t getOutputLimitPercent();
+
+    static void update();
+};
+
+#endif
+
+############################################################
+END FILE: src/fan/FanManager.h
+############################################################
+
+
+############################################################
+FILE: src/fan/FanDriver.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/fan/FanDriver.cpp
+SUMMARY: Fan driver.
+############################################################
+
+#include "FanDriver.h"
+
+#include "esp_log.h"
+
+#define TAG "FAN_DRIVER"
+
+static uint8_t s_lastSpeedPercent = 0;
+static bool s_initialized = false;
+
+void FanDriver::init()
+{
+    s_initialized = true;
+    s_lastSpeedPercent = 0;
+
+    ESP_LOGI(TAG, "Fan driver hazir. PWM henuz aktif degil.");
+}
+
+void FanDriver::setSpeedPercent(uint8_t percent)
+{
+    if (percent > 100) {
+        percent = 100;
+    }
+
+    s_lastSpeedPercent = percent;
+
+    if (!s_initialized) {
+        ESP_LOGW(TAG, "Fan driver init edilmeden speed set edildi: %u", percent);
+        return;
+    }
+
+    ESP_LOGI(TAG, "Fan speed set edildi: %u%%", percent);
+
+    // TODO:
+    // Buraya ileride gercek PWM fan surme kodu gelecek.
+    // Ornek:
+    // - LEDC timer/channel init
+    // - duty hesaplama
+    // - ledc_set_duty()
+    // - ledc_update_duty()
+}
+
+uint8_t FanDriver::getLastSpeedPercent()
+{
+    return s_lastSpeedPercent;
+}
+
+############################################################
+END FILE: src/fan/FanDriver.cpp
+############################################################
+
+
+############################################################
+FILE: src/fan/FanDriver.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/fan/FanDriver.h
+SUMMARY: Fan driver declarations.
+############################################################
+
+#ifndef FAN_DRIVER_H
+#define FAN_DRIVER_H
+
+#include <stdint.h>
+
+class FanDriver {
+public:
+    static void init();
+
+    static void setSpeedPercent(uint8_t percent);
+
+    static uint8_t getLastSpeedPercent();
+};
+
+#endif
+
+############################################################
+END FILE: src/fan/FanDriver.h
+############################################################
+
+
+############################################################
+FILE: src/fan/FanState.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/fan/FanState.h
+SUMMARY: Fan state model.
+############################################################
+
+#ifndef FAN_STATE_H
+#define FAN_STATE_H
+
+enum FanMode {
+    FAN_MODE_SILENT = 0,
+    FAN_MODE_LOW = 1,
+    FAN_MODE_MEDIUM = 2,
+    FAN_MODE_HIGH = 3,
+    FAN_MODE_AUTO = 4
+};
+
+#endif
+
+############################################################
+END FILE: src/fan/FanState.h
+############################################################
+

@@ -1,0 +1,1462 @@
+============================================================
+ANDROID 02 CONFIG FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: mesh/MeshConfigurator.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshConfigurator.kt
+SUMMARY: Low-level config mesajları: AppKey, Bind, Subscribe, Publish.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.util.Log
+import no.nordicsemi.android.mesh.ApplicationKey
+import no.nordicsemi.android.mesh.transport.ConfigAppKeyAdd
+import no.nordicsemi.android.mesh.transport.ConfigModelAppBind
+import no.nordicsemi.android.mesh.transport.ConfigModelSubscriptionAdd
+import no.nordicsemi.android.mesh.transport.ConfigModelSubscriptionDelete
+import no.nordicsemi.android.mesh.transport.ConfigModelPublicationSet
+
+class MeshConfigurator(private val meshController: MeshController) {
+
+    companion object {
+        private const val TAG = "MESH_CONFIGURATOR"
+
+        // --- ESP32 ile Birebir Uyumlu Sabitler ---
+        const val GROUP_ALL_LIGHTS = 0xC000
+        const val COMPANY_ID = 0x02E5
+        const val VENDOR_MODEL_ID = 0x0001
+    }
+
+    /**
+     * Telefonun lokal veritabanında bir AppKey (Uygulama Anahtarı) var mı kontrol eder.
+     * Yoksa, yepyeni bir tane oluşturup ağa ekler. Mesh ağı bu şifreyle konuşur.
+     */
+    private fun getOrCreateAppKey(): ApplicationKey? {
+        val network = meshController.meshManagerApi.meshNetwork
+        if (network == null) {
+            Log.e(TAG, "HATA: Mesh Network yüklenmemiş!")
+            return null
+        }
+
+        var appKey = network.appKeys.firstOrNull()
+        if (appKey == null) {
+            Log.d(TAG, "Lokal AppKey bulunamadı. Yeni bir AppKey oluşturuluyor...")
+            appKey = network.createAppKey()
+            network.addAppKey(appKey)
+            Log.d(TAG, "Yeni AppKey oluşturuldu ve NetKey ile bağlandı.")
+        }
+        return appKey
+    }
+
+    /**
+     * ADIM 1: Cihaza AppKey'i gönderir. (ConfigAppKeyAdd)
+     */
+    fun addAppKey(nodeAddress: Int) {
+        val network = meshController.meshManagerApi.meshNetwork ?: return
+        val appKey = getOrCreateAppKey() ?: return
+        val netKey = network.primaryNetworkKey ?: return
+
+        Log.d(TAG, "Config: AppKey Add gönderiliyor -> Hedef Node: 0x${nodeAddress.toString(16)}")
+
+        // Mesajı oluştur ve BLE kuyruğuna at
+        val message = ConfigAppKeyAdd(netKey, appKey)
+        meshController.meshManagerApi.createMeshPdu(nodeAddress, message)
+    }
+
+
+    fun deleteSubscription(nodeAddress: Int, elementAddress: Int, groupAddress: Int) {
+        Log.d(TAG, "Config: Group Subscription Delete -> Grup: 0x${groupAddress.toString(16)}")
+
+        val vendorModelIdentifier = (COMPANY_ID shl 16) or VENDOR_MODEL_ID
+
+        val message = ConfigModelSubscriptionDelete(
+            elementAddress,
+            groupAddress,
+            vendorModelIdentifier
+        )
+
+        meshController.meshManagerApi.createMeshPdu(nodeAddress, message)
+    }
+
+    /**
+     * ADIM 2: Gönderilen AppKey'i Vendor Model ile eşleştirir. (ConfigModelAppBind)
+     */
+    fun bindAppKeyToVendorModel(nodeAddress: Int, elementAddress: Int) {
+        val appKey = getOrCreateAppKey() ?: return
+
+        Log.d(TAG, "Config: Model App Bind gönderiliyor -> Hedef Element: 0x${elementAddress.toString(16)}")
+
+        // 🎯 DÜZELTME: Nordic SDK 3.4.0 için Vendor Model ID'yi 32-bit (Tek Sayı) olarak oluşturuyoruz: (CompanyID << 16) | ModelID
+        val vendorModelIdentifier = (COMPANY_ID shl 16) or VENDOR_MODEL_ID
+
+        // Nordic 3.4.0 Constructor: (elementAddress: Int, modelIdentifier: Int, appKeyIndex: Int)
+        val message = ConfigModelAppBind(elementAddress, vendorModelIdentifier, appKey.keyIndex)
+        meshController.meshManagerApi.createMeshPdu(nodeAddress, message)
+    }
+
+    /**
+     * ADIM 3: Cihaza "Telsizden şu grubu dinle" komutunu verir. (ConfigModelSubscriptionAdd)
+     */
+    fun addSubscription(nodeAddress: Int, elementAddress: Int, groupAddress: Int) {
+        Log.d(TAG, "Config: Group Subscription Add gönderiliyor -> Grup: 0x${groupAddress.toString(16)}")
+
+        // 🎯 DÜZELTME: Nordic SDK 3.4.0 için Vendor Model ID'yi 32-bit (Tek Sayı) olarak oluşturuyoruz
+        val vendorModelIdentifier = (COMPANY_ID shl 16) or VENDOR_MODEL_ID
+
+        // Nordic 3.4.0 Constructor: (elementAddress: Int, subscriptionAddress: Int, modelIdentifier: Int)
+        val message = ConfigModelSubscriptionAdd(elementAddress, groupAddress, vendorModelIdentifier)
+        meshController.meshManagerApi.createMeshPdu(nodeAddress, message)
+    }
+
+    /**
+     * ADIM 4 (YENİ): Cihaza "Cevaplarını doğrudan bana değil, bu gruba bağır" emrini verir.
+     */
+    fun setPublication(nodeAddress: Int, elementAddress: Int, groupAddress: Int) {
+        val appKey = getOrCreateAppKey() ?: return
+
+        Log.d(TAG, "Config: Model Publication Set gönderiliyor -> Hedef Element: 0x${elementAddress.toString(16)}, Yayını Gruba Yap: 0x${groupAddress.toString(16)}")
+
+        val vendorModelIdentifier = (COMPANY_ID shl 16) or VENDOR_MODEL_ID
+
+        // Nordic SDK'nın beklediği tam parametre sırası:
+        // 1. elementAddress: Mesajı işleyen eleman (genelde node adresiyle aynı)
+        // 2. publishAddress: Mesajın yayınlanacağı adres (0xC000 grubumuz)
+        // 3. appKeyIndex: Şifreleme için kullanılan AppKey indeksi
+        // 4. credentialFlag: Normal ağ için false
+        // 5. publishTtl: 7 (Mesaj kaç hop gidecek)
+        // 6. publicationSteps: 0 (Düzenli yayın adımı)
+        // 7. publicationResolution: 0 (Düzenli yayın çarpanı)
+        // 8. retransmitCount: 2 (Mesajı 2 kere tekrarla ki garanti gitsin)
+        // 9. retransmitIntervalSteps: 1 (Tekrarlar arası bekleme)
+        // 10. modelIdentifier: Bizim özel model ID'miz
+
+        val message = ConfigModelPublicationSet(
+            elementAddress,
+            groupAddress,
+            appKey.keyIndex,
+            false,
+            7,
+            0,
+            0,
+            2,
+            1,
+            vendorModelIdentifier
+        )
+
+        meshController.meshManagerApi.createMeshPdu(nodeAddress, message)
+    }
+}
+
+############################################################
+END FILE: mesh/MeshConfigurator.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshConfigService.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshConfigService.kt
+SUMMARY: ACK/state-driven config service.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+
+class MeshConfigService(
+    private val meshController: MeshController,
+    private val meshConfigurator: MeshConfigurator,
+    private val onStatus: (String) -> Unit,
+    private val onConfigStarted: (() -> Unit)? = null,
+    private val onConfigFinished: (() -> Unit)? = null
+) {
+    private val handler = Handler(Looper.getMainLooper())
+    private var configInProgress = false
+
+    private var waitingAck = false
+    private var ackToken = 0
+
+    private var pendingNodeAddress = -1
+    private var pendingElementAddress = -1
+    private var pendingGroupAddress = -1
+    private var pendingOnComplete: (() -> Unit)? = null
+
+    private enum class ConfigStep {
+        IDLE,
+        APP_KEY,
+        BIND,
+        SUBSCRIBE,
+        PUBLISH,
+        DONE
+    }
+
+    private var currentStep = ConfigStep.IDLE
+
+    init {
+        meshController.onConfigMessageReceived = { src, type ->
+            handleConfigAck(src, type)
+        }
+    }
+
+    fun isConfigInProgress(): Boolean {
+        return configInProgress
+    }
+
+    fun configureAllNodes(groupAddress: Int = MeshConfigurator.GROUP_ALL_LIGHTS) {
+        onStatus("⚠️ configureAllNodes geçici olarak kullanılmıyor. ACK queue fazında yeniden yazılacak.")
+        Log.w(TAG, "configureAllNodes çağrıldı ama ACK fazında devre dışı.")
+    }
+
+    fun removeNodeFromGroup(
+        nodeAddress: Int,
+        groupAddress: Int
+    ) {
+        if (!ensureProxyReady()) return
+
+        val elementAddress = nodeAddress
+
+        onStatus("Gruptan çıkarılıyor: 0x${nodeAddress.toString(16)}")
+
+        handler.postDelayed({
+            meshConfigurator.deleteSubscription(
+                nodeAddress = nodeAddress,
+                elementAddress = elementAddress,
+                groupAddress = groupAddress
+            )
+        }, 300)
+
+        handler.postDelayed({
+            onStatus("✅ Gruptan çıkarma komutu gönderildi.")
+        }, 1_200)
+    }
+
+    fun configureSingleNode(
+        nodeAddress: Int,
+        groupAddress: Int = MeshConfigurator.GROUP_ALL_LIGHTS,
+        onComplete: (() -> Unit)? = null
+    ) {
+        if (!ensureProxyReady()) return
+
+        pendingNodeAddress = nodeAddress
+        pendingElementAddress = nodeAddress
+        pendingGroupAddress = groupAddress
+        pendingOnComplete = onComplete
+
+        beginConfig("configureSingleNode ACK node=0x${nodeAddress.toString(16)}")
+
+        Log.i(
+            TAG,
+            "CONFIG_SINGLE_ACK START node=0x${nodeAddress.toString(16)} group=0x${groupAddress.toString(16)}"
+        )
+
+        onStatus("⚙️ ACK Config başlıyor -> 0x${nodeAddress.toString(16)}")
+
+        sendAppKey()
+    }
+
+    private fun handleConfigAck(src: Int, type: String) {
+        if (!configInProgress) {
+            Log.w(TAG, "ACK geldi ama config aktif değil. src=0x${src.toString(16)} type=$type")
+            return
+        }
+
+        if (!waitingAck) {
+            Log.w(TAG, "ACK geldi ama beklenen ACK yok. src=0x${src.toString(16)} type=$type")
+            return
+        }
+
+        if (src != pendingNodeAddress) {
+            Log.w(
+                TAG,
+                "ACK farklı node'dan geldi. beklenen=0x${pendingNodeAddress.toString(16)} gelen=0x${src.toString(16)} type=$type"
+            )
+            return
+        }
+
+        val expectedType = expectedAckForCurrentStep()
+
+        if (type != expectedType) {
+            Log.w(
+                TAG,
+                "ACK tipi beklenenle eşleşmedi. step=$currentStep expected=$expectedType gelen=$type"
+            )
+            return
+        }
+
+        Log.i(
+            TAG,
+            "ACK MATCH -> node=0x${src.toString(16)} type=$type currentStep=$currentStep"
+        )
+
+        waitingAck = false
+        ackToken++
+
+        when (currentStep) {
+            ConfigStep.APP_KEY -> sendBind()
+            ConfigStep.BIND -> sendSubscribe()
+            ConfigStep.SUBSCRIBE -> completeSingleNodeConfig()
+            ConfigStep.PUBLISH -> completeSingleNodeConfig()
+            else -> Unit
+        }
+    }
+
+    private fun expectedAckForCurrentStep(): String {
+        return when (currentStep) {
+            ConfigStep.APP_KEY -> "ConfigAppKeyStatus"
+            ConfigStep.BIND -> "ConfigModelAppStatus"
+            ConfigStep.SUBSCRIBE -> "ConfigModelSubscriptionStatus"
+            ConfigStep.PUBLISH -> "ConfigModelPublicationStatus"
+            else -> ""
+        }
+    }
+
+    private fun sendAppKey() {
+        currentStep = ConfigStep.APP_KEY
+        waitingAck = true
+
+        Log.i(
+            TAG,
+            "CONFIG_STEP_DEBUG AppKeyAdd -> node=0x${pendingNodeAddress.toString(16)}"
+        )
+
+        onStatus("AppKey -> 0x${pendingNodeAddress.toString(16)}")
+
+        meshConfigurator.addAppKey(pendingNodeAddress)
+
+        startAckTimeout(ConfigStep.APP_KEY)
+    }
+
+    private fun sendBind() {
+        currentStep = ConfigStep.BIND
+        waitingAck = true
+
+        Log.i(
+            TAG,
+            "CONFIG_STEP_DEBUG Bind -> node=0x${pendingNodeAddress.toString(16)}"
+        )
+
+        onStatus("Vendor Bind -> 0x${pendingNodeAddress.toString(16)}")
+
+        meshConfigurator.bindAppKeyToVendorModel(
+            pendingNodeAddress,
+            pendingElementAddress
+        )
+
+        startAckTimeout(ConfigStep.BIND)
+    }
+
+    private fun sendSubscribe() {
+        currentStep = ConfigStep.SUBSCRIBE
+        waitingAck = true
+
+        Log.i(
+            TAG,
+            "CONFIG_STEP_DEBUG Subscribe -> node=0x${pendingNodeAddress.toString(16)}"
+        )
+
+        onStatus("Group Subscribe -> 0x${pendingNodeAddress.toString(16)}")
+
+        meshConfigurator.addSubscription(
+            pendingNodeAddress,
+            pendingElementAddress,
+            pendingGroupAddress
+        )
+
+        startAckTimeout(ConfigStep.SUBSCRIBE)
+    }
+
+    private fun sendPublish() {
+        currentStep = ConfigStep.PUBLISH
+        waitingAck = true
+
+        Log.i(
+            TAG,
+            "CONFIG_STEP_DEBUG PublishSet -> node=0x${pendingNodeAddress.toString(16)}"
+        )
+
+        onStatus("Group Publish Set -> 0x${pendingNodeAddress.toString(16)}")
+
+        meshConfigurator.setPublication(
+            pendingNodeAddress,
+            pendingElementAddress,
+            pendingGroupAddress
+        )
+
+        startAckTimeout(ConfigStep.PUBLISH)
+    }
+
+    private fun completeSingleNodeConfig() {
+        currentStep = ConfigStep.DONE
+        waitingAck = false
+        ackToken++
+
+        Log.i(
+            TAG,
+            "CONFIG_SINGLE_ACK DONE node=0x${pendingNodeAddress.toString(16)}"
+        )
+
+        onStatus("✅ ACK Config tamamlandı -> 0x${pendingNodeAddress.toString(16)}")
+
+        val completeCallback = pendingOnComplete
+
+        finishConfig("ACK single node")
+
+        resetPendingState()
+
+        completeCallback?.invoke()
+    }
+
+    private fun startAckTimeout(step: ConfigStep) {
+        val tokenAtStart = ackToken
+
+        handler.postDelayed({
+            if (!configInProgress) return@postDelayed
+            if (!waitingAck) return@postDelayed
+            if (currentStep != step) return@postDelayed
+            if (ackToken != tokenAtStart) return@postDelayed
+
+            Log.e(
+                TAG,
+                "ACK TIMEOUT -> node=0x${pendingNodeAddress.toString(16)} step=$currentStep"
+            )
+
+            onStatus("❌ ACK timeout -> $currentStep")
+
+            finishConfig("ACK timeout")
+
+            resetPendingState()
+
+        }, ACK_TIMEOUT_MS)
+    }
+
+    private fun ensureProxyReady(): Boolean {
+        if (meshController.pduSender == null) {
+            val err = "❌ Proxy bağlantısı yok. Config yapılamaz."
+            Log.e(TAG, err)
+            onStatus(err)
+            return false
+        }
+
+        if (configInProgress) {
+            val err = "⚠️ Config zaten devam ediyor. Yeni config başlatılmadı."
+            Log.w(TAG, err)
+            onStatus(err)
+            return false
+        }
+
+        return true
+    }
+
+    private fun beginConfig(reason: String) {
+        configInProgress = true
+        waitingAck = false
+        currentStep = ConfigStep.IDLE
+
+        Log.w(TAG, "CONFIG_LOCK START reason=$reason")
+        onConfigStarted?.invoke()
+    }
+
+    private fun finishConfig(reason: String) {
+        configInProgress = false
+        waitingAck = false
+
+        Log.w(TAG, "CONFIG_LOCK FINISH reason=$reason")
+        onConfigFinished?.invoke()
+    }
+
+    private fun resetPendingState() {
+        currentStep = ConfigStep.IDLE
+        waitingAck = false
+        pendingNodeAddress = -1
+        pendingElementAddress = -1
+        pendingGroupAddress = -1
+        pendingOnComplete = null
+        ackToken++
+    }
+
+    companion object {
+        private const val TAG = "MESH_CONFIG_SERVICE"
+        private const val ACK_TIMEOUT_MS = 6_000L
+    }
+}
+
+############################################################
+END FILE: mesh/MeshConfigService.kt
+############################################################
+
+
+############################################################
+FILE: mesh/MeshController.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshController.kt
+SUMMARY: Config mesajlarının MeshManagerApi üzerinden gönderildiği merkez.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.content.Context
+import android.util.Log
+import no.nordicsemi.android.mesh.MeshManagerApi
+import no.nordicsemi.android.mesh.MeshManagerCallbacks
+import no.nordicsemi.android.mesh.MeshNetwork
+import no.nordicsemi.android.mesh.MeshProvisioningStatusCallbacks
+import no.nordicsemi.android.mesh.MeshStatusCallbacks
+import no.nordicsemi.android.mesh.provisionerstates.ProvisioningState
+import no.nordicsemi.android.mesh.provisionerstates.UnprovisionedMeshNode
+import no.nordicsemi.android.mesh.transport.ControlMessage
+import no.nordicsemi.android.mesh.transport.MeshMessage
+import no.nordicsemi.android.mesh.transport.ProvisionedMeshNode
+import no.nordicsemi.android.mesh.transport.ProxyConfigAddAddressToFilter
+import no.nordicsemi.android.mesh.transport.ProxyConfigSetFilterType
+import no.nordicsemi.android.mesh.utils.AddressArray
+import no.nordicsemi.android.mesh.utils.ProxyFilterType
+import java.util.UUID
+import android.os.Handler
+import android.os.Looper
+class MeshController(context: Context) {
+
+    val meshManagerApi = MeshManagerApi(context)
+
+    var pduSender: ((ByteArray) -> Unit)? = null
+    var onProvisioningStatus: ((String) -> Unit)? = null
+    var onUnprovisionedNodeReady: ((UnprovisionedMeshNode) -> Unit)? = null
+    var onMeshMessageReceived: ((Int, MeshMessage) -> Unit)? = null
+
+    var lastUnprovisionedNode: UnprovisionedMeshNode? = null
+
+    var onVendorStateReceived: ((Int, Char, Int) -> Unit)? = null
+
+    var onConfigMessageReceived: ((Int, String) -> Unit)? = null
+
+    private var currentMtu: Int = 20
+
+
+    init {
+
+
+
+        meshManagerApi.setMeshManagerCallbacks(object : MeshManagerCallbacks {
+            override fun onNetworkLoaded(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network yüklendi")
+                setupAppKeyIfNeeded(meshNetwork)
+            }
+
+            override fun onNetworkLoadFailed(error: String) {
+                Log.e(TAG, "Mesh network yüklenemedi: $error")
+            }
+
+            override fun onNetworkUpdated(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network güncellendi")
+            }
+
+            override fun onNetworkImported(meshNetwork: MeshNetwork) {
+                Log.d(TAG, "Mesh network import edildi")
+            }
+
+            override fun onNetworkImportFailed(error: String) {
+                Log.e(TAG, "Mesh network import hatası: $error")
+            }
+
+            override fun onMeshPduCreated(pdu: ByteArray) {
+                Log.d(TAG, "Mesh PDU oluşturuldu: ${pdu.toHex()}")
+                pduSender?.invoke(pdu)
+            }
+
+            override fun sendProvisioningPdu(meshNode: UnprovisionedMeshNode, pdu: ByteArray) {
+                Log.d(TAG, "Provisioning PDU oluşturuldu: ${pdu.toHex()}")
+                pduSender?.invoke(pdu)
+            }
+
+            override fun getMtu(): Int {
+                return currentMtu
+            }
+        })
+
+        meshManagerApi.setMeshStatusCallbacks(object : MeshStatusCallbacks {
+            override fun onTransactionFailed(dst: Int, hasIncompleteTimerExpired: Boolean) {
+                Log.e(TAG, "Transaction failed -> Dst: ${dst.toString(16)}")
+            }
+
+            override fun onUnknownPduReceived(src: Int, accessPayload: ByteArray?) {
+                val hex = accessPayload?.joinToString(" ") { "%02X".format(it) } ?: "null"
+                Log.w(TAG, "Unknown PDU received -> Src: 0x${src.toString(16)} Payload: $hex")
+            }
+
+            override fun onBlockAcknowledgementProcessed(dst: Int, message: ControlMessage) {}
+
+            override fun onBlockAcknowledgementReceived(src: Int, message: ControlMessage) {}
+
+            override fun onMeshMessageProcessed(dst: Int, meshMessage: MeshMessage) {
+                Log.d(TAG, "Mesh TX done -> dst: ${dst.toString(16)}, msg: ${meshMessage.javaClass.simpleName}")
+            }
+
+            override fun onMeshMessageReceived(src: Int, msg: MeshMessage) {
+                Log.d("MESH_DEBUG", "📥 MESAJ KAPIDA! Kimden: 0x${src.toString(16)} | Sinif: ${msg.javaClass.simpleName}")
+
+                var payload: ByteArray? = null
+
+                if (msg is no.nordicsemi.android.mesh.transport.VendorModelMessageStatus) {
+                    Log.d("MESH_DEBUG", "👉 Gelen mesaj STATUS tipi")
+                    payload = msg.parameters
+                } else if (msg is no.nordicsemi.android.mesh.transport.VendorModelMessageUnacked) {
+                    Log.d("MESH_DEBUG", "👉 Gelen mesaj UNACKED tipi")
+                    payload = msg.parameters
+                } else {
+
+                    val className = msg.javaClass.simpleName
+
+                    Log.d(
+                        "MESH_DEBUG",
+                        "📨 CONFIG/OTHER mesaj geldi -> $className"
+                    )
+
+                    when (className) {
+
+                        "ConfigAppKeyStatus",
+                        "ConfigModelAppStatus",
+                        "ConfigModelSubscriptionStatus",
+                        "ConfigModelPublicationStatus" -> {
+
+                            Log.i(
+                                "MESH_DEBUG",
+                                "✅ CONFIG ACK -> src=0x${src.toString(16)} type=$className"
+                            )
+
+                            onConfigMessageReceived?.invoke(src, className)
+                        }
+
+                        else -> {
+                            Log.d(
+                                "MESH_DEBUG",
+                                "❓ Bizi ilgilendirmeyen mesaj tipi: $className"
+                            )
+                        }
+                    }
+                }
+
+                if (payload != null && payload.size >= 3) {
+                    val type = payload[0].toInt().toChar()
+                    val value = ((payload[2].toInt() and 0xFF) shl 8) or (payload[1].toInt() and 0xFF)
+
+                    Log.i("MESH_DEBUG", "🔥 PAKET COZULDU -> Tip: $type, Deger: $value")
+                    onVendorStateReceived?.invoke(src, type, value)
+                } else if (payload != null) {
+                    Log.w("MESH_DEBUG", "⚠️ Payload var ama boyutu kucuk: ${payload.size}")
+                }
+
+                onMeshMessageReceived?.invoke(src, msg)
+            }
+
+            override fun onMessageDecryptionFailed(meshLayer: String?, errorMessage: String?) {
+                Log.e(TAG, "Decryption failed -> layer=$meshLayer error=$errorMessage")
+            }
+
+            override fun onHeartbeatMessageReceived(src: Int, message: ControlMessage) {
+                Log.d(TAG, "Heartbeat received -> Src: ${src.toString(16)}")
+            }
+        })
+
+        meshManagerApi.setProvisioningStatusCallbacks(object : MeshProvisioningStatusCallbacks {
+            override fun onProvisioningStateChanged(
+                meshNode: UnprovisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray?
+            ) {
+                lastUnprovisionedNode = meshNode
+                val msg = "Provision state: $state"
+                Log.d(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+
+                if (state.name.contains("CAPABILITIES", ignoreCase = true)) {
+                    Log.d(TAG, "Capabilities geldi. Node startProvisioning için hazır.")
+                    onUnprovisionedNodeReady?.invoke(meshNode)
+                }
+            }
+
+            override fun onProvisioningFailed(
+                meshNode: UnprovisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray
+            ) {
+                val msg = "Provision FAILED: $state / data: ${data.toHex()}"
+                Log.e(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+            }
+
+            override fun onProvisioningCompleted(
+                meshNode: ProvisionedMeshNode,
+                state: ProvisioningState.States,
+                data: ByteArray
+            ) {
+                val msg = "Provision COMPLETED: $state / address: ${meshNode.unicastAddress}"
+                Log.d(TAG, msg)
+                onProvisioningStatus?.invoke(msg)
+            }
+        })
+
+        meshManagerApi.loadMeshNetwork()
+        Log.d(TAG, "MeshController başlatıldı. MTU: $currentMtu")
+    }
+
+    private fun setupAppKeyIfNeeded(network: MeshNetwork) {
+
+        try {
+            network.setGlobalTtl(7)
+
+            Log.i(
+                TAG,
+                "TTL_DEBUG global TTL set to ${network.getGlobalTtl()}"
+            )
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "TTL_DEBUG global TTL set failed: ${e.message}",
+                e
+            )
+        }
+
+        if (network.appKeys.isEmpty()) {
+
+            val appKey = network.createAppKey()
+            network.addAppKey(appKey)
+
+            Log.d(
+                TAG,
+                "Ağ için yeni AppKey oluşturuldu: ${appKey.keyIndex}"
+            )
+
+        } else {
+
+            Log.d(
+                TAG,
+                "Ağda mevcut AppKey var: ${network.appKeys[0].keyIndex}"
+            )
+        }
+    }
+    /**
+     * Proxy GATT bağlantısı kurulduktan sonra çağırılır.
+     * Telefonun cevapları alabilmesi için Proxy Filter'a provisioner adresini ve ana grup adresini ekler.
+     */
+
+
+    fun setupProxyFilter() {
+        val network = meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "PROXY_FILTER_DEBUG ayarlanamadı: network yok")
+            return
+        }
+
+        val provisionerAddress = network.provisionerAddress ?: run {
+            Log.e(TAG, "PROXY_FILTER_DEBUG ayarlanamadı: provisioner address yok")
+            return
+        }
+
+        val groupAddress = MeshConfigurator.GROUP_ALL_LIGHTS
+        val handler = Handler(Looper.getMainLooper())
+
+        try {
+            Log.i(TAG, "PROXY_FILTER_DEBUG ===== START =====")
+            Log.i(TAG, "PROXY_FILTER_DEBUG provisioner=0x${provisionerAddress.toString(16)}")
+            Log.i(TAG, "PROXY_FILTER_DEBUG group=0x${groupAddress.toString(16)}")
+            Log.i(TAG, "PROXY_FILTER_DEBUG nodeCount=${network.nodes.size}")
+
+            val setInclusionFilter = ProxyConfigSetFilterType(
+                ProxyFilterType(ProxyFilterType.INCLUSION_LIST_FILTER)
+            )
+
+            Log.i(TAG, "PROXY_FILTER_DEBUG SetFilterType -> INCLUSION")
+            meshManagerApi.createMeshPdu(provisionerAddress, setInclusionFilter)
+
+            val addresses = mutableListOf<Int>()
+
+            addresses.add(provisionerAddress)
+
+            network.nodes.forEach { node ->
+                Log.i(
+                    TAG,
+                    "PROXY_FILTER_DEBUG node=${node.nodeName} unicast=0x${node.unicastAddress.toString(16)} elements=${node.elements.size}"
+                )
+
+                if (node.unicastAddress != provisionerAddress) {
+                    addresses.add(node.unicastAddress)
+                }
+            }
+
+            addresses.add(groupAddress)
+
+            var delay = 300L
+
+            addresses.forEach { address ->
+                handler.postDelayed({
+                    Log.i(TAG, "PROXY_FILTER_DEBUG AddAddress single -> 0x${address.toString(16)}")
+
+                    val addAddress = ProxyConfigAddAddressToFilter(
+                        listOf(toAddressArray(address))
+                    )
+
+                    meshManagerApi.createMeshPdu(provisionerAddress, addAddress)
+                }, delay)
+
+                delay += 300L
+            }
+
+            handler.postDelayed({
+                Log.i(TAG, "PROXY_FILTER_DEBUG totalAddressAdded=${addresses.size}")
+                Log.i(TAG, "PROXY_FILTER_DEBUG ===== DONE =====")
+            }, delay + 100L)
+
+        } catch (e: Exception) {
+            Log.e(TAG, "PROXY_FILTER_DEBUG hata: ${e.message}", e)
+        }
+    }
+
+    private fun toAddressArray(address: Int): AddressArray {
+        val high = ((address shr 8) and 0xFF).toByte()
+        val low = (address and 0xFF).toByte()
+        return AddressArray(high, low)
+    }
+
+    fun handleIncomingProvisioningPdu(pdu: ByteArray) {
+        try {
+            meshManagerApi.handleNotifications(currentMtu, pdu)
+        } catch (e: NullPointerException) {
+            Log.w(
+                TAG,
+                "Nordic SDK proxy parse NPE yakalandi, paket ignore edildi: ${pdu.joinToString(" ") { "%02X".format(it) }}"
+            )
+        } catch (e: Exception) {
+            Log.e(
+                TAG,
+                "Mesh notification parse hatasi: ${e.message}, pdu=${pdu.joinToString(" ") { "%02X".format(it) }}",
+                e
+            )
+        }
+    }
+
+    fun handleProvisioningPduSent(pdu: ByteArray) {
+        meshManagerApi.handleWriteCallbacks(currentMtu, pdu)
+    }
+
+    fun identifyNode(deviceUuid: UUID, attentionSeconds: Int = 5) {
+        meshManagerApi.identifyNode(deviceUuid, attentionSeconds)
+    }
+
+    fun startProvisioning(meshNode: UnprovisionedMeshNode) {
+        val network = meshManagerApi.meshNetwork ?: run {
+            Log.e(TAG, "Provision başlatılamadı: Mesh network yok")
+            onProvisioningStatus?.invoke("❌ Mesh network yok")
+            return
+        }
+
+        try {
+            val capabilities = meshNode.provisioningCapabilities
+            val elementCount = (capabilities?.numberOfElements ?: 1).toInt()
+            val provisioner = network.selectedProvisioner
+
+            val nextAddress = network.nextAvailableUnicastAddress(elementCount, provisioner)
+            network.assignUnicastAddress(nextAddress)
+
+            Log.i(TAG, "Yeni node için unicast atandı: 0x${nextAddress.toString(16)}")
+            onProvisioningStatus?.invoke("Node adresi atandı: 0x${nextAddress.toString(16)}")
+
+            meshManagerApi.startProvisioning(meshNode)
+        } catch (e: Exception) {
+            Log.e(TAG, "Provision address atama hatası: ${e.message}", e)
+            onProvisioningStatus?.invoke("❌ Provision address hatası: ${e.message}")
+        }
+    }
+
+    fun isProxyReady(): Boolean {
+        return pduSender != null
+    }
+
+    fun sendMeshMessage(dstAddress: Int, msg: MeshMessage) {
+        try {
+            Log.i(
+                TAG,
+                "SEQ_DEBUG BEFORE TX -> dst=0x${dstAddress.toString(16)} msg=${msg.javaClass.simpleName} seq=${dumpSequenceNumbers()}"
+            )
+
+            meshManagerApi.createMeshPdu(dstAddress, msg)
+
+            Log.i(
+                TAG,
+                "SEQ_DEBUG AFTER TX -> dst=0x${dstAddress.toString(16)} msg=${msg.javaClass.simpleName} seq=${dumpSequenceNumbers()}"
+            )
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Mesaj PDU OLUŞTURMA HATASI: ${e.message}", e)
+            onProvisioningStatus?.invoke("❌ SİSTEM HATASI: ${e.message}")
+        }
+    }
+
+    private fun dumpSequenceNumbers(): String {
+        val network = meshManagerApi.meshNetwork ?: return "network=null"
+        val sparse = network.sequenceNumbers ?: return "sequenceNumbers=null"
+
+        if (sparse.size() == 0) {
+            return "empty"
+        }
+
+        return buildString {
+            append("[")
+            for (i in 0 until sparse.size()) {
+                val key = sparse.keyAt(i)
+                val value = sparse.valueAt(i)
+
+                append("0x${key.toString(16)}=$value")
+
+                if (i < sparse.size() - 1) {
+                    append(", ")
+                }
+            }
+            append("]")
+        }
+    }
+
+    private fun ByteArray.toHex(): String {
+        return joinToString(" ") { "%02X".format(it) }
+    }
+
+    companion object {
+        private const val TAG = "MESH_CORE"
+    }
+}
+
+############################################################
+END FILE: mesh/MeshController.kt
+############################################################
+
+
+############################################################
+FILE: storage/MeshLocalStore.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/storage/MeshLocalStore.kt
+SUMMARY: Node config state, stored node/group bilgileri.
+############################################################
+
+package com.example.prolightmesh.storage
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import android.util.Log
+class MeshLocalStore(context: Context) {
+
+    private val prefs = context.getSharedPreferences("pro_light_mesh_store", Context.MODE_PRIVATE)
+
+    fun getGroups(): List<StoredGroup> {
+        val raw = prefs.getString(KEY_GROUPS, null)
+
+        if (raw.isNullOrBlank()) {
+            return listOf(StoredGroup("Tüm Işıklar", DEFAULT_ALL_LIGHTS_GROUP))
+        }
+
+        val array = JSONArray(raw)
+        val groups = mutableListOf<StoredGroup>()
+
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            groups.add(
+                StoredGroup(
+                    name = obj.getString("name"),
+                    address = obj.getInt("address")
+                )
+            )
+        }
+
+        return groups
+    }
+
+    fun removeNodeFromGroup(nodeAddress: Int, groupAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+
+        nodes[index] = node.copy(
+            groupAddresses = node.groupAddresses.filter { it != groupAddress }
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun saveGroups(groups: List<StoredGroup>) {
+        val array = JSONArray()
+
+        groups.forEach { group ->
+            array.put(
+                JSONObject()
+                    .put("name", group.name)
+                    .put("address", group.address)
+            )
+        }
+
+        prefs.edit().putString(KEY_GROUPS, array.toString()).apply()
+    }
+
+    fun addGroup(name: String): StoredGroup {
+        val groups = getGroups().toMutableList()
+        val group = StoredGroup(name, findNextGroupAddress(groups))
+
+        groups.add(group)
+        saveGroups(groups)
+
+        return group
+    }
+
+    fun deleteGroup(address: Int) {
+        if (address == DEFAULT_ALL_LIGHTS_GROUP) return
+
+        saveGroups(getGroups().filter { it.address != address })
+
+        val updatedNodes = getNodes().map { node ->
+            node.copy(groupAddresses = node.groupAddresses.filter { it != address })
+        }
+
+        saveNodes(updatedNodes)
+    }
+
+    fun getNodes(): List<StoredNode> {
+        val raw = prefs.getString(KEY_NODES, null) ?: return emptyList()
+        val array = JSONArray(raw)
+        val nodes = mutableListOf<StoredNode>()
+
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val groupArray = obj.optJSONArray("groupAddresses") ?: JSONArray()
+
+            val groups = mutableListOf<Int>()
+            for (g in 0 until groupArray.length()) {
+                groups.add(groupArray.getInt(g))
+            }
+
+            val macAddress = if (obj.has("macAddress") && !obj.isNull("macAddress")) {
+                obj.optString("macAddress")
+                    .takeIf { it.isNotBlank() && it != "null" }
+            } else {
+                null
+            }
+
+            nodes.add(
+                StoredNode(
+                    unicastAddress = obj.getInt("unicastAddress"),
+                    name = obj.optString("name", "PRO-NODE"),
+                    groupAddresses = groups,
+                    macAddress = macAddress,
+
+                    red = obj.optInt("red", 0),
+                    green = obj.optInt("green", 0),
+                    blue = obj.optInt("blue", 0),
+                    masterDim = obj.optInt("masterDim", 0),
+
+                    lastSeen = obj.optLong("lastSeen", 0L),
+                    lastSeenByScan = obj.optLong(
+                        "lastSeenByScan",
+                        obj.optLong("lastSeen", 0L)
+                    ),
+                    lastSeenByMesh = obj.optLong("lastSeenByMesh", 0L),
+                    lastRssi = obj.optInt("lastRssi", -100),
+
+                    pendingDelete = obj.optBoolean("pendingDelete", false),
+                    pendingDeleteAt = obj.optLong("pendingDeleteAt", 0L),
+                    pendingResetLastAttemptAt = obj.optLong("pendingResetLastAttemptAt", 0L),
+                    pendingResetAttemptCount = obj.optInt("pendingResetAttemptCount", 0)
+                )
+            )
+        }
+
+        return nodes
+    }
+    fun saveNodes(nodes: List<StoredNode>) {
+        val array = JSONArray()
+
+        nodes.forEach { node ->
+            val groupArray = JSONArray()
+            node.groupAddresses.forEach { groupArray.put(it) }
+
+            val obj = JSONObject()
+                .put("unicastAddress", node.unicastAddress)
+                .put("name", node.name)
+                .put("groupAddresses", groupArray)
+                .put("red", node.red)
+                .put("green", node.green)
+                .put("blue", node.blue)
+                .put("masterDim", node.masterDim)
+                .put("lastSeen", node.lastSeen)
+                .put("lastSeenByScan", node.lastSeenByScan)
+                .put("lastSeenByMesh", node.lastSeenByMesh)
+                .put("lastRssi", node.lastRssi)
+                .put("pendingDelete", node.pendingDelete)
+                .put("pendingDeleteAt", node.pendingDeleteAt)
+                .put("pendingResetLastAttemptAt", node.pendingResetLastAttemptAt)
+                .put("pendingResetAttemptCount", node.pendingResetAttemptCount)
+
+            // 🔥 KRİTİK: null ise hiç yazma
+            if (!node.macAddress.isNullOrBlank()) {
+                obj.put("macAddress", node.macAddress)
+            }
+
+            array.put(obj)
+        }
+
+        prefs.edit().putString(KEY_NODES, array.toString()).apply()
+    }
+
+    fun upsertNode(node: StoredNode) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == node.unicastAddress }
+
+        if (index >= 0) {
+            nodes[index] = node
+        } else {
+            nodes.add(node)
+        }
+
+        saveNodes(nodes)
+    }
+
+    fun addNodeToGroup(
+        nodeAddress: Int,
+        nodeName: String,
+        groupAddress: Int,
+        macAddress: String? = null
+    ) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index >= 0) {
+            val node = nodes[index]
+            val updatedGroups = (node.groupAddresses + groupAddress).distinct()
+
+            nodes[index] = node.copy(
+                name = nodeName,
+                groupAddresses = updatedGroups,
+                macAddress = macAddress ?: node.macAddress
+            )
+        } else {
+            nodes.add(
+                StoredNode(
+                    unicastAddress = nodeAddress,
+                    name = nodeName,
+                    groupAddresses = listOf(groupAddress),
+                    macAddress = macAddress
+                )
+            )
+        }
+
+        saveNodes(nodes)
+    }
+
+    fun removeNode(nodeAddress: Int) {
+        saveNodes(getNodes().filter { it.unicastAddress != nodeAddress })
+    }
+
+    fun getNode(nodeAddress: Int): StoredNode? {
+        return getNodes().firstOrNull { it.unicastAddress == nodeAddress }
+    }
+
+    // YENİ: Node statelerini tek bir harf komutuna göre güncelleyen fonksiyon
+    fun updateNodeState(nodeAddress: Int, type: Char, value: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        val updatedNode = when (type) {
+            'M' -> node.copy(masterDim = value, lastSeen = now, lastSeenByMesh = now)
+            'R' -> node.copy(red = value, lastSeen = now, lastSeenByMesh = now)
+            'G' -> node.copy(green = value, lastSeen = now, lastSeenByMesh = now)
+            'B' -> node.copy(blue = value, lastSeen = now, lastSeenByMesh = now)
+            'P' -> node.copy(lastSeen = now, lastSeenByMesh = now)
+            else -> node.copy(lastSeen = now, lastSeenByMesh = now)
+        }
+
+        nodes[index] = updatedNode
+        saveNodes(nodes)
+    }
+    fun updateLastSeen(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        nodes[index] = nodes[index].copy(
+            lastSeen = System.currentTimeMillis()
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun updateLastSeenByScanByMac(macAddress: String, rssi: Int) {
+        val nodes = getNodes().toMutableList()
+
+        val index = nodes.indexOfFirst {
+            it.macAddress.equals(macAddress, ignoreCase = true)
+        }
+
+        if (index < 0) {
+
+            Log.e(
+                "SCAN_PRESENCE",
+                "❌ MAC eşleşmedi incoming=$macAddress"
+            )
+
+            nodes.forEach {
+
+                Log.e(
+                    "SCAN_PRESENCE",
+                    "KNOWN NODE addr=0x${it.unicastAddress.toString(16)} mac=${it.macAddress}"
+                )
+            }
+
+            return
+        }
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        // Aynı node çok sık gelirse store/UI spam olmasın
+        if (now - node.lastSeenByScan < 1500L) {
+            return
+        }
+
+        val rssiDiff = kotlin.math.abs(rssi - node.lastRssi)
+
+        nodes[index] = node.copy(
+            lastSeen = now,
+            lastSeenByScan = now,
+
+            // RSSI küçük değiştiyse eski RSSI kalsın, ama lastSeen güncellensin
+            lastRssi = if (rssiDiff >= 5) rssi else node.lastRssi
+        )
+
+        Log.e(
+            "SCAN_PRESENCE",
+            "✅ SCAN UPDATE MAC addr=0x${node.unicastAddress.toString(16)} mac=$macAddress rssi=$rssi"
+        )
+
+        saveNodes(nodes)
+    }
+    fun updateLastSeenByScanByNodeAddress(nodeAddress: Int, rssi: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        // Aynı node çok sık gelirse store/UI spam olmasın
+        if (now - node.lastSeenByScan < 1500L) {
+            return
+        }
+
+        val rssiDiff = kotlin.math.abs(rssi - node.lastRssi)
+
+        nodes[index] = node.copy(
+            lastSeen = now,
+            lastSeenByScan = now,
+
+            // RSSI küçük değiştiyse eski RSSI kalsın, ama lastSeen güncellensin
+            lastRssi = if (rssiDiff >= 5) rssi else node.lastRssi
+        )
+
+        Log.e(
+            "SCAN_PRESENCE",
+            "✅ SCAN UPDATE ADDR addr=0x${nodeAddress.toString(16)} rssi=$rssi"
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun updateLastSeenByMesh(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+
+        nodes[index] = nodes[index].copy(
+            lastSeen = now,
+            lastSeenByMesh = now
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun markNodePendingDelete(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+
+        nodes[index] = nodes[index].copy(
+            pendingDelete = true,
+            pendingDeleteAt = now
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun getPendingDeleteNodeByMac(macAddress: String): StoredNode? {
+        return getNodes().firstOrNull {
+            it.pendingDelete &&
+                    it.macAddress.equals(macAddress, ignoreCase = true)
+        }
+    }
+
+    fun markPendingResetAttempt(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+        val node = nodes[index]
+
+        nodes[index] = node.copy(
+            pendingResetLastAttemptAt = now,
+            pendingResetAttemptCount = node.pendingResetAttemptCount + 1
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun canAttemptPendingReset(nodeAddress: Int): Boolean {
+        val node = getNode(nodeAddress) ?: return false
+        val now = System.currentTimeMillis()
+
+        if (!node.pendingDelete) return false
+
+        // Aynı cihaza 30 saniyeden sık reset denemeyelim
+        return now - node.pendingResetLastAttemptAt > 30_000L
+    }
+
+    fun debugBindKnownMacs() {
+        val nodes = getNodes().toMutableList()
+
+        for (i in nodes.indices) {
+            nodes[i] = when (nodes[i].unicastAddress) {
+                0x0002 -> nodes[i].copy(macAddress = "1C:DB:D4:5E:9A:36")
+                0x0004 -> nodes[i].copy(macAddress = "3C:DC:75:6E:8B:FE")
+                else -> nodes[i]
+            }
+        }
+
+        saveNodes(nodes)
+    }
+
+
+    fun getMacByNodeAddress(nodeAddress: Int): String? {
+        return getNodes()
+            .firstOrNull { it.unicastAddress == nodeAddress }
+            ?.macAddress
+    }
+
+    private fun findNextGroupAddress(groups: List<StoredGroup>): Int {
+        var address = DEFAULT_ALL_LIGHTS_GROUP + 1
+        val used = groups.map { it.address }.toSet()
+
+        while (used.contains(address)) {
+            address++
+        }
+
+        return address
+    }
+
+    companion object {
+        const val DEFAULT_ALL_LIGHTS_GROUP = 0xC000
+
+        private const val KEY_GROUPS = "groups"
+        private const val KEY_NODES = "nodes"
+    }
+}
+
+############################################################
+END FILE: storage/MeshLocalStore.kt
+############################################################
+
+
+############################################################
+FILE: storage/StoredNode.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/storage/StoredNode.kt
+SUMMARY: Persist edilen node modeli.
+############################################################
+
+package com.example.prolightmesh.storage
+
+data class StoredNode(
+    val unicastAddress: Int,
+    val name: String,
+    val groupAddresses: List<Int>,
+
+    val macAddress: String? = null,
+
+    val red: Int = 0,
+    val green: Int = 0,
+    val blue: Int = 0,
+    val masterDim: Int = 0,
+
+    val lastSeen: Long = 0L,
+
+    val lastSeenByScan: Long = 0L,
+    val lastSeenByMesh: Long = 0L,
+    val lastRssi: Int = -100,
+
+    // Offline silinen ama ESP'ye reset gönderilmemiş cihazlar
+    val pendingDelete: Boolean = false,
+    val pendingDeleteAt: Long = 0L,
+    val pendingResetLastAttemptAt: Long = 0L,
+    val pendingResetAttemptCount: Int = 0
+)
+
+############################################################
+END FILE: storage/StoredNode.kt
+############################################################
+
+
+############################################################
+FILE: storage/StoredGroup.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/storage/StoredGroup.kt
+SUMMARY: Persist edilen group modeli.
+############################################################
+
+package com.example.prolightmesh.storage
+
+data class StoredGroup(
+    val name: String,
+    val address: Int
+)
+
+############################################################
+END FILE: storage/StoredGroup.kt
+############################################################
+

@@ -1,0 +1,529 @@
+============================================================
+ESP 03 TIME SYNC SCHEDULER FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: src/time_sync/TimeSyncManager.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/time_sync/TimeSyncManager.cpp
+SUMMARY: ESP local/phone time sync and offset handling.
+############################################################
+
+#include "TimeSyncManager.h"
+
+#include "esp_log.h"
+#include "esp_timer.h"
+
+#define TAG "TIME_SYNC"
+
+static bool s_isSynced = false;
+static int64_t s_phoneMinusLocalOffsetMs = 0;
+static uint32_t s_lastSyncLocalMs = 0;
+
+static uint32_t nowMs()
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+void TimeSyncManager::init()
+{
+    s_isSynced = false;
+    s_phoneMinusLocalOffsetMs = 0;
+    s_lastSyncLocalMs = 0;
+
+    ESP_LOGI(TAG, "Time sync manager hazir.");
+}
+
+void TimeSyncManager::updateSync(uint32_t phoneTimeMs)
+{
+    uint32_t localNow = nowMs();
+
+    s_phoneMinusLocalOffsetMs = (int64_t)phoneTimeMs - (int64_t)localNow;
+    s_lastSyncLocalMs = localNow;
+    s_isSynced = true;
+
+    ESP_LOGI(
+        TAG,
+        "SYNC UPDATED | phone=%lu local=%lu offset=%lld",
+        (unsigned long)phoneTimeMs,
+        (unsigned long)localNow,
+        (long long)s_phoneMinusLocalOffsetMs
+    );
+}
+
+bool TimeSyncManager::isSynced()
+{
+    return s_isSynced;
+}
+
+uint32_t TimeSyncManager::phoneTimeToLocalMs(uint32_t phoneTimeMs)
+{
+    int64_t local = (int64_t)phoneTimeMs - s_phoneMinusLocalOffsetMs;
+
+    if (local < 0) {
+        return 0;
+    }
+
+    return (uint32_t)local;
+}
+
+uint32_t TimeSyncManager::localTimeToPhoneMs(uint32_t localTimeMs)
+{
+    int64_t phone = (int64_t)localTimeMs + s_phoneMinusLocalOffsetMs;
+
+    if (phone < 0) {
+        return 0;
+    }
+
+    return (uint32_t)phone;
+}
+
+uint32_t TimeSyncManager::getLastSyncAgeMs()
+{
+    if (!s_isSynced) {
+        return 0xFFFFFFFF;
+    }
+
+    return nowMs() - s_lastSyncLocalMs;
+}
+
+############################################################
+END FILE: src/time_sync/TimeSyncManager.cpp
+############################################################
+
+
+############################################################
+FILE: src/time_sync/TimeSyncManager.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/time_sync/TimeSyncManager.h
+SUMMARY: Time sync declarations.
+############################################################
+
+#ifndef TIME_SYNC_MANAGER_H
+#define TIME_SYNC_MANAGER_H
+
+#include <stdint.h>
+
+class TimeSyncManager {
+public:
+    static void init();
+
+    static void updateSync(uint32_t phoneTimeMs);
+
+    static bool isSynced();
+
+    static uint32_t phoneTimeToLocalMs(uint32_t phoneTimeMs);
+
+    static uint32_t localTimeToPhoneMs(uint32_t localTimeMs);
+
+    static uint32_t getLastSyncAgeMs();
+};
+
+#endif
+
+############################################################
+END FILE: src/time_sync/TimeSyncManager.h
+############################################################
+
+
+############################################################
+FILE: src/control/command/LightCommandScheduler.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/command/LightCommandScheduler.cpp
+SUMMARY: Scheduled command enqueue/reject/apply timing.
+############################################################
+
+#include "LightCommandScheduler.h"
+
+#include "esp_log.h"
+#include "esp_timer.h"
+
+#include "LightCommandProcessor.h"
+#include "LightRuntimeHealth.h"
+#include "TimeSyncManager.h"
+
+#define TAG "LIGHT_CMD_SCHED"
+
+static constexpr int MAX_SCHEDULED_COMMANDS = 16;
+static constexpr int MAX_RECENT_CUES = 32;
+
+static LightCommand s_scheduledCommands[MAX_SCHEDULED_COMMANDS];
+static bool s_scheduledUsed[MAX_SCHEDULED_COMMANDS];
+
+static uint16_t s_recentCueIds[MAX_RECENT_CUES];
+static int s_recentCueNext = 0;
+
+static uint32_t nowMs()
+{
+    return (uint32_t)(esp_timer_get_time() / 1000ULL);
+}
+
+void LightCommandScheduler::init()
+{
+    for (int i = 0; i < MAX_SCHEDULED_COMMANDS; i++) {
+        s_scheduledUsed[i] = false;
+    }
+
+    for (int i = 0; i < MAX_RECENT_CUES; i++) {
+        s_recentCueIds[i] = 0;
+    }
+
+    s_recentCueNext = 0;
+
+    ESP_LOGI(TAG, "Light command scheduler hazir.");
+}
+
+bool LightCommandScheduler::isDuplicateCue(const LightCommand& command)
+{
+    if (!command.isV2 || command.cueId == 0) {
+        return false;
+    }
+
+    for (int i = 0; i < MAX_RECENT_CUES; i++) {
+        if (s_recentCueIds[i] == command.cueId) {
+            return true;
+        }
+    }
+
+    s_recentCueIds[s_recentCueNext] = command.cueId;
+    s_recentCueNext = (s_recentCueNext + 1) % MAX_RECENT_CUES;
+
+    return false;
+}
+
+bool LightCommandScheduler::schedule(const LightCommand& command)
+{
+    if (isDuplicateCue(command)) {
+        ESP_LOGW(
+            TAG,
+            "Duplicate cue ignore | cueId=%u type=%d value=%u",
+            command.cueId,
+            (int)command.type,
+            command.value
+        );
+        return true;
+    }
+
+     if (command.type == LightCommandType::TIME_SYNC) {
+        return LightCommandProcessor::apply(command);
+    }
+
+    LightCommand scheduledCommand = command;
+
+    if (!scheduledCommand.isV2 || scheduledCommand.startAtMs == 0) {
+        scheduledCommand.applyAtMs = 0;
+        return LightCommandProcessor::apply(scheduledCommand);
+    }
+
+    if (!TimeSyncManager::isSynced()) {
+        ESP_LOGW(
+            TAG,
+            "Time sync yok, V2 komut hemen uygulanacak | type=%d value=%u startAt=%lu cueId=%u",
+            (int)scheduledCommand.type,
+            scheduledCommand.value,
+            (unsigned long)scheduledCommand.startAtMs,
+            scheduledCommand.cueId
+        );
+
+        scheduledCommand.applyAtMs = 0;
+        return LightCommandProcessor::apply(scheduledCommand);
+    }
+
+    scheduledCommand.applyAtMs = TimeSyncManager::phoneTimeToLocalMs(
+        scheduledCommand.startAtMs
+    );
+
+    if (scheduledCommand.applyAtMs <= nowMs()) {
+        ESP_LOGW(
+            TAG,
+            "Scheduled zaman gecmis, hemen uygulanacak | type=%d value=%u startAt=%lu applyAt=%lu cueId=%u",
+            (int)scheduledCommand.type,
+            scheduledCommand.value,
+            (unsigned long)scheduledCommand.startAtMs,
+            (unsigned long)scheduledCommand.applyAtMs,
+            scheduledCommand.cueId
+        );
+
+        return LightCommandProcessor::apply(scheduledCommand);
+    }
+
+    for (int i = 0; i < MAX_SCHEDULED_COMMANDS; i++) {
+        if (!s_scheduledUsed[i]) {
+            s_scheduledCommands[i] = scheduledCommand;
+            s_scheduledUsed[i] = true;
+
+            ESP_LOGI(
+                TAG,
+                "Scheduled command | slot=%d type=%d value=%u startAt=%lu applyAt=%lu cueId=%u p1=%u p2=%u",
+                i,
+                (int)scheduledCommand.type,
+                scheduledCommand.value,
+                (unsigned long)scheduledCommand.startAtMs,
+                (unsigned long)scheduledCommand.applyAtMs,
+                scheduledCommand.cueId,
+                scheduledCommand.param1,
+                scheduledCommand.param2
+            );
+
+            return true;
+        }
+    }
+
+    LightRuntimeHealth::notifyCommandDropped();
+
+    ESP_LOGE(
+        TAG,
+        "Scheduler dolu, komut dusuruldu | type=%d value=%u startAt=%lu cueId=%u",
+        (int)scheduledCommand.type,
+        scheduledCommand.value,
+        (unsigned long)scheduledCommand.startAtMs,
+        scheduledCommand.cueId
+    );
+
+    return false;
+}
+
+void LightCommandScheduler::processDueCommands()
+{
+    uint32_t now = nowMs();
+
+    for (int i = 0; i < MAX_SCHEDULED_COMMANDS; i++) {
+        if (!s_scheduledUsed[i]) {
+            continue;
+        }
+
+        LightCommand& command = s_scheduledCommands[i];
+
+        if (command.applyAtMs <= now) {
+            ESP_LOGI(
+                TAG,
+                "Apply scheduled command | slot=%d type=%d value=%u cueId=%u",
+                i,
+                (int)command.type,
+                command.value,
+                command.cueId
+            );
+
+            LightCommandProcessor::apply(command);
+            s_scheduledUsed[i] = false;
+        }
+    }
+}
+
+############################################################
+END FILE: src/control/command/LightCommandScheduler.cpp
+############################################################
+
+
+############################################################
+FILE: src/control/command/LightCommandScheduler.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/command/LightCommandScheduler.h
+SUMMARY: Scheduler declarations.
+############################################################
+
+#ifndef LIGHT_COMMAND_SCHEDULER_H
+#define LIGHT_COMMAND_SCHEDULER_H
+
+#include "LightCommand.h"
+
+class LightCommandScheduler {
+public:
+    static void init();
+
+    static bool schedule(const LightCommand& command);
+
+    static void processDueCommands();
+
+private:
+    static bool isDuplicateCue(const LightCommand& command);
+};
+
+#endif
+
+############################################################
+END FILE: src/control/command/LightCommandScheduler.h
+############################################################
+
+
+############################################################
+FILE: src/control/command/LightCommandQueue.cpp
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/command/LightCommandQueue.cpp
+SUMMARY: Command queue implementation.
+############################################################
+
+#include "LightCommandQueue.h"
+#include "LightRuntimeHealth.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+
+#include "Logger.h"
+
+#define TAG "LIGHT_CMD_QUEUE"
+
+static QueueHandle_t s_lightCommandQueue = nullptr;
+
+bool LightCommandQueue::init()
+{
+    if (s_lightCommandQueue != nullptr) {
+        return true;
+    }
+
+    s_lightCommandQueue = xQueueCreate(64, sizeof(LightCommand));
+
+    if (s_lightCommandQueue == nullptr) {
+        Logger::error(TAG, "Light command queue olusturulamadi!");
+        return false;
+    }
+
+    Logger::info(TAG, "Light command queue hazir.");
+    return true;
+}
+
+bool LightCommandQueue::push(const LightCommand& command)
+{
+    if (s_lightCommandQueue == nullptr) {
+        LightRuntimeHealth::notifyCommandDropped();
+        Logger::error(TAG, "Queue hazir degil, komut atilamadi.");
+        return false;
+    }
+
+    BaseType_t ok = xQueueSend(s_lightCommandQueue, &command, 0);
+
+    if (ok != pdTRUE) {
+        LightRuntimeHealth::notifyCommandDropped();
+        Logger::error(TAG, "Queue dolu, light komutu dusuruldu.");
+        return false;
+    }
+
+    return true;
+}
+
+bool LightCommandQueue::pop(LightCommand& outCommand)
+{
+    if (s_lightCommandQueue == nullptr) {
+        return false;
+    }
+
+    BaseType_t ok = xQueueReceive(s_lightCommandQueue, &outCommand, 0);
+    return ok == pdTRUE;
+}
+
+bool LightCommandQueue::isReady()
+{
+    return s_lightCommandQueue != nullptr;
+}
+
+############################################################
+END FILE: src/control/command/LightCommandQueue.cpp
+############################################################
+
+
+############################################################
+FILE: src/control/command/LightCommandQueue.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/command/LightCommandQueue.h
+SUMMARY: Queue declarations.
+############################################################
+
+#ifndef LIGHT_COMMAND_QUEUE_H
+#define LIGHT_COMMAND_QUEUE_H
+
+#include "LightCommand.h"
+
+class LightCommandQueue {
+public:
+    static bool init();
+    static bool push(const LightCommand& command);
+    static bool pop(LightCommand& outCommand);
+    static bool isReady();
+};
+
+#endif
+
+############################################################
+END FILE: src/control/command/LightCommandQueue.h
+############################################################
+
+
+############################################################
+FILE: src/control/command/LightCommand.h
+RESOLVED_PATH: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node/src/control/command/LightCommand.h
+SUMMARY: Command model.
+############################################################
+
+#ifndef LIGHT_COMMAND_H
+#define LIGHT_COMMAND_H
+
+#include <stdint.h>
+
+enum class LightCommandSource {
+    BLE_MESH,
+    CRMX,
+    LOCAL_UI,
+    SYSTEM,
+    UNKNOWN
+};
+
+enum class LightCommandTargetType {
+    UNICAST,
+    GROUP,
+    LOCAL,
+    UNKNOWN
+};
+
+enum class LightCommandType {
+    RED,
+    GREEN,
+    BLUE,
+    MASTER_DIMMER,
+    EFFECT_SELECT,
+    FAN_MODE,
+    PING,
+    HEALTH,
+    TIME_SYNC,
+    UNKNOWN
+};
+
+struct LightCommand {
+    LightCommandType type;
+    uint16_t value;
+
+    LightCommandSource source;
+    LightCommandTargetType targetType;
+
+    uint16_t src;
+    uint16_t dst;
+    uint16_t self;
+    uint8_t ttl;
+
+    bool isV2;
+    uint32_t startAtMs;
+    uint16_t cueId;
+    uint8_t param1;
+    uint8_t param2;
+
+    uint32_t receivedAtMs;
+    uint32_t applyAtMs;
+};
+
+#endif
+
+############################################################
+END FILE: src/control/command/LightCommand.h
+############################################################
+

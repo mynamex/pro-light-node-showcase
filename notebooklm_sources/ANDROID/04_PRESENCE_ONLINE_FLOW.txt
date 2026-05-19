@@ -1,0 +1,1008 @@
+============================================================
+ANDROID 04 PRESENCE ONLINE FLOW
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+############################################################
+FILE: mesh/MeshPresenceService.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/mesh/MeshPresenceService.kt
+SUMMARY: Presence scan: cihaz online/stale/offline takibi.
+############################################################
+
+package com.example.prolightmesh.mesh
+
+import android.os.Handler
+import android.util.Log
+import com.example.prolightmesh.ble.BleScannerManager
+
+class MeshPresenceService(
+    private val scannerManagerProvider: () -> BleScannerManager,
+    private val mainHandler: Handler
+) {
+    private var running = false
+    private var paused = false
+    private var networkScreenVisible = false
+    private var scanInProgress = false
+
+    fun start() {
+        if (running) return
+
+        running = true
+
+        if (!paused) {
+            scheduleNextScan(0L)
+        }
+    }
+
+    fun stop() {
+        running = false
+        paused = false
+        scanInProgress = false
+        scannerManagerProvider().stopScan()
+    }
+
+    fun pause(reason: String) {
+        if (paused) return
+
+        paused = true
+        scanInProgress = false
+
+        Log.w(TAG, "Presence pause edildi. reason=$reason")
+        scannerManagerProvider().stopScan()
+    }
+
+    fun resume(reason: String) {
+        if (!paused) return
+
+        paused = false
+
+        Log.w(TAG, "Presence resume edildi. reason=$reason")
+
+        if (running) {
+            scheduleNextScan(500L)
+        }
+    }
+
+    fun isPaused(): Boolean {
+        return paused
+    }
+
+    fun setNetworkScreenVisible(visible: Boolean) {
+        networkScreenVisible = visible
+    }
+
+    private fun scheduleNextScan(delayMs: Long) {
+        mainHandler.postDelayed({
+            if (!running || paused) return@postDelayed
+            runScanBurst()
+        }, delayMs)
+    }
+
+    private fun runScanBurst() {
+        if (!running || paused) return
+
+        if (scannerManagerProvider().isScanRunning()) {
+            scheduleNextScan(getIntervalMs())
+            return
+        }
+
+        scanInProgress = true
+
+        Log.e(TAG, "Presence scan başladı. networkVisible=$networkScreenVisible")
+
+        scannerManagerProvider().startScan()
+
+        mainHandler.postDelayed({
+            scannerManagerProvider().stopScan()
+            scanInProgress = false
+
+            Log.e(TAG, "Presence scan bitti.")
+
+            if (running && !paused) {
+                scheduleNextScan(getIntervalMs())
+            }
+        }, getDurationMs())
+    }
+
+    private fun getDurationMs(): Long {
+        return if (networkScreenVisible) {
+            4_000L
+        } else {
+            3_000L
+        }
+    }
+
+    private fun getIntervalMs(): Long {
+        return if (networkScreenVisible) {
+            10_000L
+        } else {
+            30_000L
+        }
+    }
+
+    companion object {
+        private const val TAG = "MESH_PRESENCE"
+    }
+}
+
+############################################################
+END FILE: mesh/MeshPresenceService.kt
+############################################################
+
+
+############################################################
+FILE: ble/BleScannerManager.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ble/BleScannerManager.kt
+SUMMARY: BLE scan ve cihaz sınıflandırma.
+############################################################
+
+package com.example.prolightmesh.ble
+
+import android.annotation.SuppressLint
+import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothManager
+import android.bluetooth.le.ScanCallback
+import android.bluetooth.le.ScanResult
+import android.bluetooth.le.ScanSettings
+import android.content.Context
+import android.os.ParcelUuid
+import android.util.Log
+import java.util.UUID
+
+class BleScannerManager(
+    context: Context,
+    private val onDeviceFound: (MeshScanResult) -> Unit,
+    private val onScanFinished: (Int) -> Unit,
+    private val onError: (String) -> Unit
+) {
+
+    enum class ScanStopReason {
+        NORMAL,
+        PAUSE,
+        PROVISION,
+        FORCE
+    }
+    private val foundDevices = mutableSetOf<String>()
+
+    private var isScanning = false
+
+    private val bluetoothAdapter: BluetoothAdapter by lazy {
+        val manager = context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager
+        manager.adapter
+    }
+
+    private val scanner by lazy {
+        bluetoothAdapter.bluetoothLeScanner
+    }
+
+    private val meshProvisioningServiceUuid =
+        ParcelUuid(UUID.fromString("00001827-0000-1000-8000-00805f9b34fb"))
+
+    private val meshProxyServiceUuid =
+        ParcelUuid(UUID.fromString("00001828-0000-1000-8000-00805f9b34fb"))
+
+    private val scanCallback = object : ScanCallback() {
+
+        @SuppressLint("MissingPermission")
+        override fun onScanResult(callbackType: Int, result: ScanResult) {
+            val device = result.device
+            val record = result.scanRecord ?: return
+
+            val name = record.deviceName ?: device.name ?: "İSİMSİZ"
+            val address = device.address ?: "MAC_YOK"
+            val rssi = result.rssi
+
+            val serviceUuids = record.serviceUuids
+            val provisioningServiceData = record.getServiceData(meshProvisioningServiceUuid)
+            val proxyServiceData = record.getServiceData(meshProxyServiceUuid)
+
+            val isProvisionable =
+                serviceUuids?.contains(meshProvisioningServiceUuid) == true &&
+                        provisioningServiceData != null &&
+                        provisioningServiceData.size >= 16
+
+            val isProvisioned =
+                serviceUuids?.contains(meshProxyServiceUuid) == true
+
+            if (!isProvisionable && !isProvisioned) {
+//                Log.d(
+//                    "BLE_SCAN_SKIP",
+//                    "Atlandı: name=$name address=$address rssi=$rssi " +
+//                            "services=${serviceUuids ?: "UUID yok"} " +
+//                            "provData=${provisioningServiceData?.toHex() ?: "yok"} " +
+//                            "proxyData=${proxyServiceData?.toHex() ?: "yok"}"
+//                )
+                return
+            }
+
+            val key = address
+
+// Unprovisioned cihazları listede tekrar tekrar göstermeyelim.
+// Ama provisioned cihazlarda presence için her scan sonucunu MainActivity'ye bildirelim.
+            if (!isProvisioned) {
+                if (foundDevices.contains(key)) return
+                foundDevices.add(key)
+            }
+
+            val serviceText = serviceUuids?.joinToString(", ") ?: "UUID yok"
+
+            val serviceDataHex =
+                provisioningServiceData?.toHex() ?: "serviceData yok"
+
+            val deviceUuid =
+                if (isProvisionable) {
+                    parseDeviceUuidFromServiceData(provisioningServiceData!!)
+                } else {
+                    null
+                }
+
+            val resultItem = MeshScanResult(
+                name = name,
+                address = address,
+                rssi = rssi,
+                services = serviceText,
+                serviceData = serviceDataHex,
+                deviceUuid = deviceUuid,
+                isProvisioned = isProvisioned,
+                nodeAddressFromAdv = null
+            )
+
+//            Log.d("BLE_SCAN", "Mesh node bulundu: $resultItem")
+            onDeviceFound(resultItem)
+        }
+
+        override fun onScanFailed(errorCode: Int) {
+            isScanning = false
+
+            val detail = when (errorCode) {
+                SCAN_FAILED_ALREADY_STARTED -> "SCAN_FAILED_ALREADY_STARTED: Tarama zaten çalışıyor."
+                SCAN_FAILED_APPLICATION_REGISTRATION_FAILED -> "SCAN_FAILED_APPLICATION_REGISTRATION_FAILED"
+                SCAN_FAILED_INTERNAL_ERROR -> "SCAN_FAILED_INTERNAL_ERROR"
+                SCAN_FAILED_FEATURE_UNSUPPORTED -> "SCAN_FAILED_FEATURE_UNSUPPORTED"
+                else -> "Bilinmeyen scan hatası"
+            }
+
+            Log.e("BLE_SCAN_ERROR", "Scan failed: code=$errorCode detail=$detail")
+            onError("Scan failed: $errorCode | $detail")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun startScan() {
+        if (isScanning) {
+            Log.w("BLE_SCAN", "Tarama zaten çalışıyor. İkinci startScan engellendi.")
+            return
+        }
+
+        if (!bluetoothAdapter.isEnabled) {
+            onError("Bluetooth kapalı.")
+            return
+        }
+
+        foundDevices.clear()
+
+        val settings = ScanSettings.Builder()
+            .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
+            .build()
+
+        try {
+            isScanning = true
+            scanner.startScan(null, settings, scanCallback)
+            Log.d("BLE_SCAN", "Tarama başladı.")
+        } catch (e: Exception) {
+            isScanning = false
+            Log.e("BLE_SCAN_ERROR", "Tarama başlatılamadı", e)
+            onError("Tarama başlatılamadı: ${e.message}")
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    fun stopScan(reason: ScanStopReason = ScanStopReason.NORMAL) {
+
+        if (!isScanning) {
+            Log.d("BLE_SCAN", "stopScan çağrıldı ama aktif tarama yok. reason=$reason")
+            return
+        }
+
+        try {
+            scanner.stopScan(scanCallback)
+            isScanning = false
+
+            Log.d(
+                "BLE_SCAN",
+                "Tarama durduruldu. reason=$reason bulunan=${foundDevices.size}"
+            )
+
+            // KRİTİK:
+            // Provision/pause sırasında onScanFinished tetikleme.
+            if (reason == ScanStopReason.NORMAL) {
+                onScanFinished(foundDevices.size)
+            }
+
+        } catch (e: Exception) {
+            isScanning = false
+            Log.e("BLE_SCAN_ERROR", "Tarama durdurulamadı", e)
+            onError("Tarama durdurulamadı: ${e.message}")
+        }
+    }
+
+    fun isScanRunning(): Boolean {
+        return isScanning
+    }
+
+    private fun parseDeviceUuidFromServiceData(data: ByteArray): UUID? {
+        if (data.size < 16) return null
+
+        val hex = data.take(16).joinToString("") {
+            "%02x".format(it)
+        }
+
+        val uuidText =
+            "${hex.substring(0, 8)}-" +
+                    "${hex.substring(8, 12)}-" +
+                    "${hex.substring(12, 16)}-" +
+                    "${hex.substring(16, 20)}-" +
+                    hex.substring(20, 32)
+
+        return UUID.fromString(uuidText)
+    }
+
+    private fun ByteArray.toHex(): String {
+        return joinToString(" ") { "%02X".format(it) }
+    }
+}
+
+############################################################
+END FILE: ble/BleScannerManager.kt
+############################################################
+
+
+############################################################
+FILE: ble/MeshScanResult.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ble/MeshScanResult.kt
+SUMMARY: Scan result modeli.
+############################################################
+
+package com.example.prolightmesh.ble
+
+import java.util.UUID
+
+data class MeshScanResult(
+    val name: String,
+    val address: String,
+    val rssi: Int,
+    val services: String,
+    val serviceData: String,
+    val deviceUuid: UUID?,
+    val isProvisioned: Boolean,
+
+    // Yeni mimari
+    val nodeAddressFromAdv: Int? = null,
+    val identityVersion: Int? = null,
+    val identityFlags: Int? = null,
+    val fwVersion: Int? = null
+)
+
+############################################################
+END FILE: ble/MeshScanResult.kt
+############################################################
+
+
+############################################################
+FILE: ble/BlePermissionHelper.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ble/BlePermissionHelper.kt
+SUMMARY: BLE permission yardımcı sınıfı.
+############################################################
+
+package com.example.prolightmesh.ble
+
+import android.Manifest
+import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
+
+class BlePermissionHelper(
+    private val activity: Activity
+) {
+    fun hasPermissions(): Boolean {
+        return if (Build.VERSION.SDK_INT >= 31) {
+            ContextCompat.checkSelfPermission(
+                activity,
+                Manifest.permission.BLUETOOTH_SCAN
+            ) == PackageManager.PERMISSION_GRANTED &&
+                    ContextCompat.checkSelfPermission(
+                        activity,
+                        Manifest.permission.BLUETOOTH_CONNECT
+                    ) == PackageManager.PERMISSION_GRANTED
+        } else {
+            ContextCompat.checkSelfPermission(
+                activity,
+                Manifest.permission.ACCESS_FINE_LOCATION
+            ) == PackageManager.PERMISSION_GRANTED
+        }
+    }
+
+    fun requestPermissions() {
+        val permissions = mutableListOf<String>()
+
+        if (Build.VERSION.SDK_INT >= 31) {
+            permissions.add(Manifest.permission.BLUETOOTH_SCAN)
+            permissions.add(Manifest.permission.BLUETOOTH_CONNECT)
+        } else {
+            permissions.add(Manifest.permission.ACCESS_FINE_LOCATION)
+        }
+
+        val missing = permissions.filter {
+            ContextCompat.checkSelfPermission(activity, it) != PackageManager.PERMISSION_GRANTED
+        }
+
+        if (missing.isNotEmpty()) {
+            ActivityCompat.requestPermissions(
+                activity,
+                missing.toTypedArray(),
+                1001
+            )
+        }
+    }
+}
+
+############################################################
+END FILE: ble/BlePermissionHelper.kt
+############################################################
+
+
+############################################################
+FILE: ui/screens/NetworkScreen.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/ui/screens/NetworkScreen.kt
+SUMMARY: Network online/offline gösterimi.
+############################################################
+
+package com.example.prolightmesh.ui.screens
+
+import android.app.Activity
+import android.graphics.Typeface
+import android.view.Gravity
+import android.view.ViewGroup
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import com.example.prolightmesh.ui.components.DeviceMiniCard
+import com.example.prolightmesh.ui.theme.ProColors
+
+class NetworkScreen(
+    private val activity: Activity
+) {
+    val rootView: ScrollView
+    private val container: LinearLayout
+    private val statusText: TextView
+
+    init {
+        container = LinearLayout(activity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(40, 64, 40, 40)
+            setBackgroundColor(ProColors.Background)
+        }
+
+        val title = TextView(activity).apply {
+            text = "CİHAZ AĞI"
+            textSize = 24f
+            setTypeface(null, Typeface.BOLD)
+            setTextColor(ProColors.TextPrimary)
+            gravity = Gravity.CENTER
+        }
+
+        statusText = TextView(activity).apply {
+            text = "Bağlı cihazlar yükleniyor..."
+            textSize = 14f
+            setTextColor(ProColors.TextSecondary)
+            gravity = Gravity.CENTER
+            setPadding(0, 8, 0, 48)
+        }
+
+        container.addView(title)
+        container.addView(statusText)
+
+        rootView = ScrollView(activity).apply {
+            isFillViewport = true
+            setBackgroundColor(ProColors.Background)
+            addView(container)
+        }
+    }
+
+    fun setStatus(text: String) {
+        statusText.text = text
+    }
+
+    fun addNodeCard(card: DeviceMiniCard) {
+        container.addView(card)
+    }
+
+    fun clear() {
+        // Title ve StatusText hariç diğer cihazları sil (ilk 2 view kalır)
+        while (container.childCount > 2) {
+            container.removeViewAt(2)
+        }
+    }
+}
+
+############################################################
+END FILE: ui/screens/NetworkScreen.kt
+############################################################
+
+
+############################################################
+FILE: storage/MeshLocalStore.kt
+RESOLVED_PATH: /home/zen/AndroidStudioProjects/ProLightMesh/app/src/main/java/com/example/prolightmesh/storage/MeshLocalStore.kt
+SUMMARY: lastSeen, RSSI, node state persist alanı.
+############################################################
+
+package com.example.prolightmesh.storage
+
+import android.content.Context
+import org.json.JSONArray
+import org.json.JSONObject
+import android.util.Log
+class MeshLocalStore(context: Context) {
+
+    private val prefs = context.getSharedPreferences("pro_light_mesh_store", Context.MODE_PRIVATE)
+
+    fun getGroups(): List<StoredGroup> {
+        val raw = prefs.getString(KEY_GROUPS, null)
+
+        if (raw.isNullOrBlank()) {
+            return listOf(StoredGroup("Tüm Işıklar", DEFAULT_ALL_LIGHTS_GROUP))
+        }
+
+        val array = JSONArray(raw)
+        val groups = mutableListOf<StoredGroup>()
+
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            groups.add(
+                StoredGroup(
+                    name = obj.getString("name"),
+                    address = obj.getInt("address")
+                )
+            )
+        }
+
+        return groups
+    }
+
+    fun removeNodeFromGroup(nodeAddress: Int, groupAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+
+        nodes[index] = node.copy(
+            groupAddresses = node.groupAddresses.filter { it != groupAddress }
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun saveGroups(groups: List<StoredGroup>) {
+        val array = JSONArray()
+
+        groups.forEach { group ->
+            array.put(
+                JSONObject()
+                    .put("name", group.name)
+                    .put("address", group.address)
+            )
+        }
+
+        prefs.edit().putString(KEY_GROUPS, array.toString()).apply()
+    }
+
+    fun addGroup(name: String): StoredGroup {
+        val groups = getGroups().toMutableList()
+        val group = StoredGroup(name, findNextGroupAddress(groups))
+
+        groups.add(group)
+        saveGroups(groups)
+
+        return group
+    }
+
+    fun deleteGroup(address: Int) {
+        if (address == DEFAULT_ALL_LIGHTS_GROUP) return
+
+        saveGroups(getGroups().filter { it.address != address })
+
+        val updatedNodes = getNodes().map { node ->
+            node.copy(groupAddresses = node.groupAddresses.filter { it != address })
+        }
+
+        saveNodes(updatedNodes)
+    }
+
+    fun getNodes(): List<StoredNode> {
+        val raw = prefs.getString(KEY_NODES, null) ?: return emptyList()
+        val array = JSONArray(raw)
+        val nodes = mutableListOf<StoredNode>()
+
+        for (i in 0 until array.length()) {
+            val obj = array.getJSONObject(i)
+            val groupArray = obj.optJSONArray("groupAddresses") ?: JSONArray()
+
+            val groups = mutableListOf<Int>()
+            for (g in 0 until groupArray.length()) {
+                groups.add(groupArray.getInt(g))
+            }
+
+            val macAddress = if (obj.has("macAddress") && !obj.isNull("macAddress")) {
+                obj.optString("macAddress")
+                    .takeIf { it.isNotBlank() && it != "null" }
+            } else {
+                null
+            }
+
+            nodes.add(
+                StoredNode(
+                    unicastAddress = obj.getInt("unicastAddress"),
+                    name = obj.optString("name", "PRO-NODE"),
+                    groupAddresses = groups,
+                    macAddress = macAddress,
+
+                    red = obj.optInt("red", 0),
+                    green = obj.optInt("green", 0),
+                    blue = obj.optInt("blue", 0),
+                    masterDim = obj.optInt("masterDim", 0),
+
+                    lastSeen = obj.optLong("lastSeen", 0L),
+                    lastSeenByScan = obj.optLong(
+                        "lastSeenByScan",
+                        obj.optLong("lastSeen", 0L)
+                    ),
+                    lastSeenByMesh = obj.optLong("lastSeenByMesh", 0L),
+                    lastRssi = obj.optInt("lastRssi", -100),
+
+                    pendingDelete = obj.optBoolean("pendingDelete", false),
+                    pendingDeleteAt = obj.optLong("pendingDeleteAt", 0L),
+                    pendingResetLastAttemptAt = obj.optLong("pendingResetLastAttemptAt", 0L),
+                    pendingResetAttemptCount = obj.optInt("pendingResetAttemptCount", 0)
+                )
+            )
+        }
+
+        return nodes
+    }
+    fun saveNodes(nodes: List<StoredNode>) {
+        val array = JSONArray()
+
+        nodes.forEach { node ->
+            val groupArray = JSONArray()
+            node.groupAddresses.forEach { groupArray.put(it) }
+
+            val obj = JSONObject()
+                .put("unicastAddress", node.unicastAddress)
+                .put("name", node.name)
+                .put("groupAddresses", groupArray)
+                .put("red", node.red)
+                .put("green", node.green)
+                .put("blue", node.blue)
+                .put("masterDim", node.masterDim)
+                .put("lastSeen", node.lastSeen)
+                .put("lastSeenByScan", node.lastSeenByScan)
+                .put("lastSeenByMesh", node.lastSeenByMesh)
+                .put("lastRssi", node.lastRssi)
+                .put("pendingDelete", node.pendingDelete)
+                .put("pendingDeleteAt", node.pendingDeleteAt)
+                .put("pendingResetLastAttemptAt", node.pendingResetLastAttemptAt)
+                .put("pendingResetAttemptCount", node.pendingResetAttemptCount)
+
+            // 🔥 KRİTİK: null ise hiç yazma
+            if (!node.macAddress.isNullOrBlank()) {
+                obj.put("macAddress", node.macAddress)
+            }
+
+            array.put(obj)
+        }
+
+        prefs.edit().putString(KEY_NODES, array.toString()).apply()
+    }
+
+    fun upsertNode(node: StoredNode) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == node.unicastAddress }
+
+        if (index >= 0) {
+            nodes[index] = node
+        } else {
+            nodes.add(node)
+        }
+
+        saveNodes(nodes)
+    }
+
+    fun addNodeToGroup(
+        nodeAddress: Int,
+        nodeName: String,
+        groupAddress: Int,
+        macAddress: String? = null
+    ) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index >= 0) {
+            val node = nodes[index]
+            val updatedGroups = (node.groupAddresses + groupAddress).distinct()
+
+            nodes[index] = node.copy(
+                name = nodeName,
+                groupAddresses = updatedGroups,
+                macAddress = macAddress ?: node.macAddress
+            )
+        } else {
+            nodes.add(
+                StoredNode(
+                    unicastAddress = nodeAddress,
+                    name = nodeName,
+                    groupAddresses = listOf(groupAddress),
+                    macAddress = macAddress
+                )
+            )
+        }
+
+        saveNodes(nodes)
+    }
+
+    fun removeNode(nodeAddress: Int) {
+        saveNodes(getNodes().filter { it.unicastAddress != nodeAddress })
+    }
+
+    fun getNode(nodeAddress: Int): StoredNode? {
+        return getNodes().firstOrNull { it.unicastAddress == nodeAddress }
+    }
+
+    // YENİ: Node statelerini tek bir harf komutuna göre güncelleyen fonksiyon
+    fun updateNodeState(nodeAddress: Int, type: Char, value: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        val updatedNode = when (type) {
+            'M' -> node.copy(masterDim = value, lastSeen = now, lastSeenByMesh = now)
+            'R' -> node.copy(red = value, lastSeen = now, lastSeenByMesh = now)
+            'G' -> node.copy(green = value, lastSeen = now, lastSeenByMesh = now)
+            'B' -> node.copy(blue = value, lastSeen = now, lastSeenByMesh = now)
+            'P' -> node.copy(lastSeen = now, lastSeenByMesh = now)
+            else -> node.copy(lastSeen = now, lastSeenByMesh = now)
+        }
+
+        nodes[index] = updatedNode
+        saveNodes(nodes)
+    }
+    fun updateLastSeen(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        nodes[index] = nodes[index].copy(
+            lastSeen = System.currentTimeMillis()
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun updateLastSeenByScanByMac(macAddress: String, rssi: Int) {
+        val nodes = getNodes().toMutableList()
+
+        val index = nodes.indexOfFirst {
+            it.macAddress.equals(macAddress, ignoreCase = true)
+        }
+
+        if (index < 0) {
+
+            Log.e(
+                "SCAN_PRESENCE",
+                "❌ MAC eşleşmedi incoming=$macAddress"
+            )
+
+            nodes.forEach {
+
+                Log.e(
+                    "SCAN_PRESENCE",
+                    "KNOWN NODE addr=0x${it.unicastAddress.toString(16)} mac=${it.macAddress}"
+                )
+            }
+
+            return
+        }
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        // Aynı node çok sık gelirse store/UI spam olmasın
+        if (now - node.lastSeenByScan < 1500L) {
+            return
+        }
+
+        val rssiDiff = kotlin.math.abs(rssi - node.lastRssi)
+
+        nodes[index] = node.copy(
+            lastSeen = now,
+            lastSeenByScan = now,
+
+            // RSSI küçük değiştiyse eski RSSI kalsın, ama lastSeen güncellensin
+            lastRssi = if (rssiDiff >= 5) rssi else node.lastRssi
+        )
+
+        Log.e(
+            "SCAN_PRESENCE",
+            "✅ SCAN UPDATE MAC addr=0x${node.unicastAddress.toString(16)} mac=$macAddress rssi=$rssi"
+        )
+
+        saveNodes(nodes)
+    }
+    fun updateLastSeenByScanByNodeAddress(nodeAddress: Int, rssi: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val node = nodes[index]
+        val now = System.currentTimeMillis()
+
+        // Aynı node çok sık gelirse store/UI spam olmasın
+        if (now - node.lastSeenByScan < 1500L) {
+            return
+        }
+
+        val rssiDiff = kotlin.math.abs(rssi - node.lastRssi)
+
+        nodes[index] = node.copy(
+            lastSeen = now,
+            lastSeenByScan = now,
+
+            // RSSI küçük değiştiyse eski RSSI kalsın, ama lastSeen güncellensin
+            lastRssi = if (rssiDiff >= 5) rssi else node.lastRssi
+        )
+
+        Log.e(
+            "SCAN_PRESENCE",
+            "✅ SCAN UPDATE ADDR addr=0x${nodeAddress.toString(16)} rssi=$rssi"
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun updateLastSeenByMesh(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+
+        nodes[index] = nodes[index].copy(
+            lastSeen = now,
+            lastSeenByMesh = now
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun markNodePendingDelete(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+
+        nodes[index] = nodes[index].copy(
+            pendingDelete = true,
+            pendingDeleteAt = now
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun getPendingDeleteNodeByMac(macAddress: String): StoredNode? {
+        return getNodes().firstOrNull {
+            it.pendingDelete &&
+                    it.macAddress.equals(macAddress, ignoreCase = true)
+        }
+    }
+
+    fun markPendingResetAttempt(nodeAddress: Int) {
+        val nodes = getNodes().toMutableList()
+        val index = nodes.indexOfFirst { it.unicastAddress == nodeAddress }
+
+        if (index < 0) return
+
+        val now = System.currentTimeMillis()
+        val node = nodes[index]
+
+        nodes[index] = node.copy(
+            pendingResetLastAttemptAt = now,
+            pendingResetAttemptCount = node.pendingResetAttemptCount + 1
+        )
+
+        saveNodes(nodes)
+    }
+
+    fun canAttemptPendingReset(nodeAddress: Int): Boolean {
+        val node = getNode(nodeAddress) ?: return false
+        val now = System.currentTimeMillis()
+
+        if (!node.pendingDelete) return false
+
+        // Aynı cihaza 30 saniyeden sık reset denemeyelim
+        return now - node.pendingResetLastAttemptAt > 30_000L
+    }
+
+    fun debugBindKnownMacs() {
+        val nodes = getNodes().toMutableList()
+
+        for (i in nodes.indices) {
+            nodes[i] = when (nodes[i].unicastAddress) {
+                0x0002 -> nodes[i].copy(macAddress = "1C:DB:D4:5E:9A:36")
+                0x0004 -> nodes[i].copy(macAddress = "3C:DC:75:6E:8B:FE")
+                else -> nodes[i]
+            }
+        }
+
+        saveNodes(nodes)
+    }
+
+
+    fun getMacByNodeAddress(nodeAddress: Int): String? {
+        return getNodes()
+            .firstOrNull { it.unicastAddress == nodeAddress }
+            ?.macAddress
+    }
+
+    private fun findNextGroupAddress(groups: List<StoredGroup>): Int {
+        var address = DEFAULT_ALL_LIGHTS_GROUP + 1
+        val used = groups.map { it.address }.toSet()
+
+        while (used.contains(address)) {
+            address++
+        }
+
+        return address
+    }
+
+    companion object {
+        const val DEFAULT_ALL_LIGHTS_GROUP = 0xC000
+
+        private const val KEY_GROUPS = "groups"
+        private const val KEY_NODES = "nodes"
+    }
+}
+
+############################################################
+END FILE: storage/MeshLocalStore.kt
+############################################################
+

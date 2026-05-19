@@ -1,0 +1,93 @@
+============================================================
+ESP FILE MANIFEST
+Generated for NotebookLM analysis
+Generated at: 2026-05-18T02:48:37
+Root: /home/zen/Documents/PlatformIO/Projects/Pro-Light-Node
+Project: Pro-Light BLE Mesh
+============================================================
+
+GLOBAL GOAL:
+Sidus Link-like production-grade Android + ESP32 BLE Mesh cinema lighting system.
+
+IMPORTANT TERMS:
+- Provisioning: Cihazı ilk kez BLE Mesh ağına alma işlemi.
+- Config: AppKey, Model Bind, Group Subscription, Publication gibi mesh ayarlarını yapma işlemi.
+- Proxy Node: Telefonun BLE GATT üzerinden bağlandığı mesh giriş kapısı.
+- Presence: BLE scan ile cihazın yakında/online olup olmadığını anlama.
+- State Authority: Sistemde son doğru state bilgisinin kimde tutulduğu.
+- Scheduler: Gelecekte uygulanacak komutları zamanına göre sıraya alan katman.
+- Cue: Zamanlı uygulanacak ışık/effect komutu.
+
+============================================================
+
+
+## MODULE: 01_MESH_CORE_VENDOR_FLOW.txt
+
+- [OK] platformio.ini (388 bytes) — PlatformIO env, board, build flags.
+- [OK] sdkconfig.defaults (1800 bytes) — Default ESP-IDF config.
+- [OK] sdkconfig.pro_light_s3_N16R8 (87248 bytes) — Generated active sdkconfig.
+- [OK] CMakeLists.txt (113 bytes) — Root CMake.
+- [OK] src/CMakeLists.txt (383 bytes) — src CMake.
+- [OK] src/main.cpp (3150 bytes) — App bootstrap and FreeRTOS task startup.
+- [OK] src/mesh/core/node_mesh.c (10030 bytes) — BLE Mesh init, provisioning, composition, relay/proxy config.
+- [OK] src/mesh/core/node_mesh.h (669 bytes) — Public mesh API.
+- [OK] src/mesh/core/node_mesh_defs.h (551 bytes) — Company ID, model ID, opcodes, group constants.
+- [OK] src/mesh/vendor/node_mesh_vendor.c (8234 bytes) — Vendor RX callback, legacy/V2 command handoff, status response.
+- [OK] src/mesh/vendor/node_mesh_vendor.h (402 bytes) — Vendor API.
+- [OK] src/mesh/manager/MeshNodeManager.cpp (3562 bytes) — C++ bridge from mesh RX to command/state layers.
+- [OK] src/mesh/manager/MeshNodeManager.h (178 bytes) — MeshNodeManager declarations.
+
+## MODULE: 02_PROTOCOL_DECODER_FLOW.txt
+
+- [OK] src/protocol/ProLightProtocol.h (501 bytes) — Protocol constants and data structures.
+- [OK] src/protocol/ProLightCommand.h (353 bytes) — Decoded command model.
+- [OK] src/protocol/ProLightProtocolDecoder.cpp (2415 bytes) — Legacy/V2 packet decoder.
+- [OK] src/protocol/ProLightProtocolDecoder.h (345 bytes) — Decoder declarations.
+
+## MODULE: 03_TIME_SYNC_SCHEDULER_FLOW.txt
+
+- [OK] src/time_sync/TimeSyncManager.cpp (1542 bytes) — ESP local/phone time sync and offset handling.
+- [OK] src/time_sync/TimeSyncManager.h (391 bytes) — Time sync declarations.
+- [OK] src/control/command/LightCommandScheduler.cpp (4791 bytes) — Scheduled command enqueue/reject/apply timing.
+- [OK] src/control/command/LightCommandScheduler.h (334 bytes) — Scheduler declarations.
+- [OK] src/control/command/LightCommandQueue.cpp (1425 bytes) — Command queue implementation.
+- [OK] src/control/command/LightCommandQueue.h (281 bytes) — Queue declarations.
+- [OK] src/control/command/LightCommand.h (795 bytes) — Command model.
+
+## MODULE: 04_COMMAND_RENDER_EFFECT_FLOW.txt
+
+- [OK] src/control/command/LightCommandProcessor.cpp (4376 bytes) — Command processor.
+- [OK] src/control/command/LightCommandProcessor.h (196 bytes) — Processor declarations.
+- [OK] src/control/render/LightRenderEngine.cpp (2390 bytes) — Final render/apply layer.
+- [OK] src/control/render/LightRenderEngine.h (131 bytes) — Render engine declarations.
+- [OK] src/effects/LightEffectEngine.cpp (1548 bytes) — Effect execution engine.
+- [OK] src/effects/LightEffectEngine.h (310 bytes) — Effect engine declarations.
+- [OK] src/effects/LightEffectType.h (201 bytes) — Effect type enum/constants.
+- [OK] src/hardware/LightState.h (608 bytes) — Runtime light state.
+- [OK] src/hardware/OnboardLed.cpp (881 bytes) — Onboard LED apply layer.
+- [OK] src/hardware/OnboardLed.h (207 bytes) — Onboard LED declarations.
+
+## MODULE: 05_HEALTH_SAFETY_TELEMETRY_FLOW.txt
+
+- [OK] src/control/health/LightRuntimeHealth.cpp (1502 bytes) — Runtime health checks.
+- [OK] src/control/health/LightRuntimeHealth.h (478 bytes) — Health declarations.
+- [OK] src/control/safety/LightSafety.cpp (307 bytes) — Safety layer.
+- [OK] src/control/safety/LightSafety.h (297 bytes) — Safety declarations.
+- [OK] src/telemetry/TelemetryBridge.cpp (1006 bytes) — Telemetry bridge.
+- [OK] src/telemetry/TelemetryBridge.h (435 bytes) — Telemetry declarations.
+- [OK] src/thermal/ThermalManager.cpp (906 bytes) — Thermal manager.
+- [OK] src/thermal/ThermalManager.h (311 bytes) — Thermal manager declarations.
+- [OK] src/thermal/ThermalSensor.cpp (0 bytes) — Thermal sensor.
+- [OK] src/thermal/ThermalSensor.h (0 bytes) — Thermal sensor declarations.
+- [OK] src/thermal/ThermalState.h (215 bytes) — Thermal state model.
+- [OK] src/fan/FanManager.cpp (1630 bytes) — Fan manager.
+- [OK] src/fan/FanManager.h (334 bytes) — Fan manager declarations.
+- [OK] src/fan/FanDriver.cpp (896 bytes) — Fan driver.
+- [OK] src/fan/FanDriver.h (218 bytes) — Fan driver declarations.
+- [OK] src/fan/FanState.h (183 bytes) — Fan state model.
+
+## MODULE: 06_HARDWARE_SUPPORT_FLOW.txt
+
+- [OK] src/hardware/Config.h (2250 bytes) — Hardware constants.
+- [OK] src/hardware/Logger.cpp (285 bytes) — Logging helper.
+- [OK] src/hardware/Logger.h (195 bytes) — Logging declarations.
