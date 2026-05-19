@@ -10,3 +10,8 @@ The project focuses heavily on:
 * embedded stability
 * production-oriented mesh infrastructure
 * reproducible diagnostics
+
+
+## Responsible Disclosure
+
+If you discover a security-related issue, protocol vulnerability, or unsafe mesh behavior, please open a private security report instead of creating a public issue.
