@@ -1,4 +1,4 @@
-# Pro-Light Node
+# Pro-Light Node Showcase
 
 ![Platform](https://img.shields.io/badge/platform-ESP32_S3-blue)
 ![Framework](https://img.shields.io/badge/framework-ESP--IDF-green)
@@ -6,11 +6,30 @@
 ![Status](https://img.shields.io/badge/status-active_development-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 
-Pro-Light Node is an ESP32-S3 based BLE Mesh lighting node firmware designed for scalable professional lighting systems.
+> This repository contains the public-facing architecture, diagnostics workflows, development notes, screenshots, and infrastructure overview for the Pro-Light Node project.
+>
+> The core firmware and production mesh implementation are currently maintained in a separate private repository while the system architecture is actively evolving.
 
-The project focuses on building a lightweight, production-oriented embedded mesh infrastructure for resource-constrained devices using ESP-IDF and Bluetooth Mesh Vendor Models.
+Pro-Light Node is an ESP32-S3 based BLE Mesh lighting infrastructure project designed for scalable professional lighting systems.
 
-The long-term vision is to create a robust open-source lighting ecosystem inspired by professional systems such as Sidus Link while remaining accessible to independent developers and makers.
+The long-term vision is to create a lightweight, production-oriented lighting ecosystem inspired by professional synchronized lighting platforms such as Sidus Link, while remaining accessible to independent developers, makers, and small production teams.
+
+---
+
+# What This Repository Contains
+
+This public showcase repository includes:
+
+- architecture overview
+- development screenshots
+- hardware testing evidence
+- Android control interface screenshots
+- provisioning workflow documentation
+- diagnostic workflow notes
+- NotebookLM-assisted engineering context
+- public roadmap and production goals
+
+This repository does **not** contain the current private firmware source code.
 
 ---
 
@@ -20,31 +39,31 @@ The long-term vision is to create a robust open-source lighting ecosystem inspir
 
 Production-oriented Android mesh control interface with:
 
-* real-time node visibility
-* RSSI monitoring
-* online/offline lifecycle tracking
-* mesh diagnostics
-* node management workflows
+- real-time node visibility
+- RSSI monitoring
+- online/offline lifecycle tracking
+- mesh diagnostics
+- node management workflows
 
 ---
 
 # Device Discovery and Provisioning
 
-### Device Discovery
+## Device Discovery
 
 ![Provisioning Scan](assets/images/new_device_scan.jpeg)
 
-### Provisioning Workflow
+## Provisioning Workflow
 
 ![Provisioning Setup](assets/images/provise_setup.jpeg)
 
 The onboarding architecture focuses on:
 
-* controlled provisioning
-* production-safe lifecycle handling
-* group assignment
-* scalable node management
-* future large-scale deployment support
+- controlled provisioning
+- production-safe lifecycle handling
+- group assignment
+- scalable node management
+- future large-scale deployment support
 
 ---
 
@@ -54,10 +73,10 @@ The onboarding architecture focuses on:
 
 Low-latency RGB control system supporting:
 
-* group lighting control
-* distributed mesh commands
-* real-time color workflows
-* synchronized lighting behaviors
+- group lighting control
+- distributed mesh commands
+- real-time color workflows
+- synchronized lighting behaviors
 
 ---
 
@@ -67,10 +86,10 @@ Low-latency RGB control system supporting:
 
 Experimental synchronized effect infrastructure supporting:
 
-* distributed lighting effects
-* scheduler-driven execution
-* future cue/timeline systems
-* coordinated multi-node behavior
+- distributed lighting effects
+- scheduler-driven execution
+- future cue/timeline systems
+- coordinated multi-node behavior
 
 ---
 
@@ -82,11 +101,11 @@ The project is actively tested on real ESP32-S3 hardware during architecture ite
 
 Current testing areas include:
 
-* BLE Mesh reliability
-* multicast/group delivery behavior
-* synchronization workflows
-* runtime telemetry
-* production-safe node lifecycle handling
+- BLE Mesh reliability
+- multicast/group delivery behavior
+- synchronization workflows
+- runtime telemetry
+- production-safe node lifecycle handling
 
 ---
 
@@ -94,89 +113,36 @@ Current testing areas include:
 
 ![Diagnostic Engine](assets/images/diagnostic.png)
 
-Custom runtime diagnostic and packet analysis tooling used for:
+Custom runtime diagnostic and packet analysis tooling is used for:
 
-* BLE Mesh lifecycle debugging
-* packet inspection
-* synchronization analysis
-* onboarding diagnostics
-* runtime telemetry analysis
-* Android + ESP trace correlation
-* large-scale reasoning workflows
+- BLE Mesh lifecycle debugging
+- packet inspection
+- synchronization analysis
+- onboarding diagnostics
+- runtime telemetry analysis
+- Android + ESP trace correlation
+- large-scale reasoning workflows
 
----
-
-# Goals
-
-* Stable BLE Mesh communication
-* Reliable group/unicast command delivery
-* Time-synchronized lighting effects
-* Production-grade node lifecycle management
-* Scalable multi-node lighting architecture
-* Real-world hardware testing
-* Low-latency lighting control workflows
+The diagnostic tooling itself is currently maintained privately while selected public documentation and screenshots are shared here.
 
 ---
 
-# Core Subsystems
+# Project Goals
 
-## Mesh Infrastructure
-
-* `mesh/core`
-  BLE Mesh initialization and transport layer.
-
-* `mesh/vendor`
-  Vendor model packet handling and runtime communication.
-
-* `mesh/manager`
-  Node lifecycle and mesh coordination management.
+- Stable BLE Mesh communication
+- Reliable group/unicast command delivery
+- Time-synchronized lighting effects
+- Production-grade node lifecycle management
+- Scalable multi-node lighting architecture
+- Real-world hardware testing
+- Low-latency lighting control workflows
+- Reproducible diagnostics and trace analysis
 
 ---
 
-## Protocol Infrastructure
+# Architecture Overview
 
-* `ProLightProtocolDecoder`
-  Protocol abstraction and packet decoding infrastructure.
-
-* `protocol/`
-  Runtime command interpretation and protocol workflows.
-
----
-
-## Command + Scheduler Systems
-
-* `LightCommandScheduler`
-  Distributed scheduled command execution infrastructure.
-
-* `LightCommandProcessor`
-  Runtime command execution pipeline.
-
-* `LightCommandQueue`
-  Command buffering and execution ordering.
-
----
-
-## Runtime Safety + Health
-
-* `LightRuntimeHealth`
-  Runtime health monitoring subsystem.
-
-* `LightSafety`
-  Production-oriented command validation and safety controls.
-
-* `TelemetryBridge`
-  Runtime telemetry and diagnostics integration layer.
-
----
-
-## Synchronization Infrastructure
-
-* `TimeSyncManager`
-  Experimental synchronization system for coordinated multi-node execution.
-
----
-
-# Repository Structure
+The private firmware is structured around modular embedded subsystems.
 
 ```text
 src/
@@ -204,139 +170,3 @@ src/
  ├── thermal/
  │
  └── time_sync/
-```
-
----
-
-# Structured Diagnostic Workflows
-
-The repository also includes structured engineering and diagnostic resources under:
-
-```text
-notebooklm_sources/
-```
-
-These resources contain:
-
-* Android lifecycle traces
-* provisioning flow documentation
-* protocol analysis notes
-* synchronization debugging workflows
-* ESP runtime diagnostics
-* telemetry reasoning references
-* architecture context bundles
-
-The goal is to support reproducible debugging and large-scale system reasoning during embedded mesh infrastructure development.
-
----
-
-# Tech Stack
-
-* ESP32-S3
-* ESP-IDF
-* PlatformIO
-* Bluetooth Mesh
-* Vendor Models
-* FreeRTOS
-* Kotlin Android
-* BLE GATT
-* Custom Vendor Protocols
-
----
-
-# Development Philosophy
-
-This project prioritizes:
-
-* stability over shortcuts
-* architecture over temporary fixes
-* real hardware validation
-* reproducible debugging
-* production-oriented infrastructure
-* maintainable subsystem separation
-
----
-
-# Project Status
-
-Active development.
-
-The repository is currently under rapid architecture iteration and real hardware testing.
-
-Main ongoing areas:
-
-* mesh reliability
-* synchronization systems
-* telemetry infrastructure
-* distributed scheduling
-* node lifecycle management
-* production diagnostics
-
----
-
-# Roadmap
-
-## Phase 1 — Core Stability
-
-* [x] BLE Mesh vendor communication
-* [x] Group command support
-* [x] Unicast command support
-* [x] RGB lighting control
-* [x] Master dimmer support
-* [x] Real hardware testing
-
----
-
-## Phase 2 — Protocol Infrastructure
-
-* [x] Protocol decoder layer
-* [x] Command scheduling system
-* [x] Time synchronization experiments
-* [x] Telemetry bridge foundation
-
----
-
-## Phase 3 — Production Architecture
-
-* [ ] Reliable multi-node synchronization
-* [ ] Production-grade online/offline detection
-* [ ] Scheduler safety improvements
-* [ ] Structured diagnostics
-* [ ] Node recovery strategies
-* [ ] Mesh congestion handling
-
----
-
-## Phase 4 — Advanced Lighting Infrastructure
-
-* [ ] Scene engine
-* [ ] Cue timeline system
-* [ ] Distributed synchronized effects
-* [ ] Large-scale node orchestration
-* [ ] Mobile control integration
-
----
-
-# License
-
-MIT License
-
-
-## Development Philosophy
-
-The project prioritizes long-term production stability over rapid feature accumulation.
-
-Key engineering priorities include:
-
-- deterministic node behavior
-- transport reliability
-- scheduler safety
-- telemetry-driven diagnostics
-- modular subsystem separation
-- real hardware validation
-
-> This repository is the public documentation, architecture, diagnostics, and development showcase for Pro-Light Node.  
-> Core firmware implementation is currently developed in a private repository and will be open-sourced progressively as the architecture stabilizes.
-
-
-
