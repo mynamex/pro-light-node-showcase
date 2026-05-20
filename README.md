@@ -170,3 +170,151 @@ src/
  ├── thermal/
  │
  └── time_sync/
+```
+
+---
+
+# Core Architectural Areas
+
+## Mesh Infrastructure
+
+Responsible for BLE Mesh lifecycle, vendor model communication, transport behavior, and node coordination.
+
+## Protocol Infrastructure
+
+Responsible for packet interpretation, command abstraction, protocol evolution, and compatibility between Android control logic and ESP32 nodes.
+
+## Command and Scheduler Systems
+
+Responsible for command processing, scheduled execution, future cue systems, and synchronized multi-node behavior.
+
+## Runtime Safety and Health
+
+Responsible for safe command execution, node health monitoring, thermal/fan integration, and production-oriented runtime validation.
+
+## Telemetry and Diagnostics
+
+Responsible for structured runtime visibility, trace correlation, debugging workflows, and future production monitoring.
+
+## Synchronization Infrastructure
+
+Responsible for time synchronization experiments and coordinated execution across multiple lighting nodes.
+
+---
+
+# Structured Diagnostic Workflows
+
+This repository includes public diagnostic and reasoning resources under:
+
+```text
+notebooklm_sources/
+```
+
+These resources contain:
+
+- Android lifecycle traces
+- provisioning flow documentation
+- protocol analysis notes
+- synchronization debugging workflows
+- ESP runtime diagnostics
+- telemetry reasoning references
+- architecture context bundles
+
+The goal is to support reproducible debugging and large-scale system reasoning during embedded mesh infrastructure development.
+
+---
+
+# Tech Stack
+
+- ESP32-S3
+- ESP-IDF
+- PlatformIO
+- Bluetooth Mesh
+- Vendor Models
+- FreeRTOS
+- Kotlin Android
+- BLE GATT
+- Custom Vendor Protocols
+- Structured diagnostics workflows
+
+---
+
+# Development Philosophy
+
+This project prioritizes:
+
+- stability over shortcuts
+- architecture over temporary fixes
+- real hardware validation
+- reproducible debugging
+- production-oriented infrastructure
+- maintainable subsystem separation
+- privacy-conscious progressive open-sourcing
+
+---
+
+# Project Status
+
+Active development.
+
+The core firmware is developed privately while this repository tracks public architecture, documentation, diagnostics, roadmap, and showcase materials.
+
+Main ongoing areas:
+
+- mesh reliability
+- synchronization systems
+- telemetry infrastructure
+- distributed scheduling
+- node lifecycle management
+- production diagnostics
+
+---
+
+# Roadmap
+
+## Phase 1 — Core Stability
+
+- [x] BLE Mesh vendor communication
+- [x] Group command support
+- [x] Unicast command support
+- [x] RGB lighting control
+- [x] Master dimmer support
+- [x] Real hardware testing
+
+## Phase 2 — Protocol Infrastructure
+
+- [x] Protocol decoder architecture
+- [x] Command scheduling design
+- [x] Time synchronization experiments
+- [x] Telemetry bridge foundation
+
+## Phase 3 — Production Architecture
+
+- [ ] Reliable multi-node synchronization
+- [ ] Production-grade online/offline detection
+- [ ] Scheduler safety improvements
+- [ ] Structured diagnostics
+- [ ] Node recovery strategies
+- [ ] Mesh congestion handling
+
+## Phase 4 — Progressive Open Source Release
+
+- [ ] Publish stable protocol documentation
+- [ ] Publish selected diagnostic examples
+- [ ] Publish sanitized architecture notes
+- [ ] Open-source selected non-sensitive utilities
+- [ ] Evaluate release of stable firmware modules
+
+## Phase 5 — Advanced Lighting Infrastructure
+
+- [ ] Scene engine
+- [ ] Cue timeline system
+- [ ] Distributed synchronized effects
+- [ ] Large-scale node orchestration
+- [ ] Mobile control integration
+
+---
+
+# License
+
+MIT License
